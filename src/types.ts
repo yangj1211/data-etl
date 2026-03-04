@@ -1,5 +1,6 @@
 export type ContentBlock =
-  | { type: 'text'; text: string };
+  | { type: 'text'; text: string }
+  | { type: 'reuse_card'; database: string; table: string; sourceTables: string[] };
 
 export interface ChatMessage {
   id: string;
@@ -100,6 +101,8 @@ export interface ProcessedTable {
   fieldMappings: FieldMapping[];
   /** 加工 SQL（INSERT INTO ... SELECT） */
   insertSql: string;
+  /** 加工时的对话历史（用于生成加工逻辑摘要） */
+  chatHistory?: { role: string; content: string }[];
   /** 最近加工时间 */
   processedAt: number;
 }

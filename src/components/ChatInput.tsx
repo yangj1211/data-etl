@@ -1,11 +1,17 @@
 import { useState, useRef, useEffect } from 'react';
-import { SendHorizonal, Wrench, BarChart3 } from 'lucide-react';
+import { SendHorizonal, Wrench, BarChart3, Repeat2, Eye } from 'lucide-react';
 import { useStore } from '../store';
 import { useMetricChatStore } from '../metricChatStore';
 import { useChatModeStore } from '../chatModeStore';
+import { useProcessedTableStore } from '../processedTableStore';
+import { useDashboardStore } from '../dashboardStore';
+import type { ProcessedTable } from '../types';
+import LineageModal from './LineageModal';
 
 export default function ChatInput() {
   const [text, setText] = useState('');
+  const [showReuse, setShowReuse] = useState(false);
+  const [previewTable, setPreviewTable] = useState<ProcessedTable | null>(null);
   const mode = useChatModeStore(s => s.mode);
   const setMode = useChatModeStore(s => s.setMode);
 
@@ -13,6 +19,10 @@ export default function ChatInput() {
   const etlSend = useStore(s => s.sendMessage);
   const metricProcessing = useMetricChatStore(s => s.isProcessing);
   const metricSend = useMetricChatStore(s => s.sendMessage);
+
+  const allProcessedTables = useProcessedTableStore(s => s.tables);
+  const dashboards = useDashboardStore(s => s.dashboards);
+  const activeDashboardId = useDashboardStore(s => s.activeDashboardId);
 
   const isProcessing = mode === 'etl' ? etlProcessing : metricProcessing;
   const sendMessage = mode === 'etl' ? etlSend : metricSend;
@@ -41,6 +51,27 @@ export default function ChatInput() {
     ? '输入连接串或描述数据加工需求...'
     : '描述你想创建的指标...';
 
+  // 获取可复用的加工逻辑（排除当前 dashboard 的）
+  const reusableTables = allProcessedTables.filter(
+    t => t.insertSql && t.dashboardId !== activeDashboardId
+  );
+  const getDashboardName = (id: string) =>
+    dashboards.find(d => d.id === id)?.name || '未知';
+
+  const handleReuse = (table: typeof reusableTables[0]) => {
+    if (isProcessing) return;
+    // Directly send with reuse context — no intermediate state needed
+    etlSend('', {
+      database: table.database,
+      table: table.table,
+      sourceTables: table.sourceTables,
+      fieldMappings: table.fieldMappings,
+      insertSql: table.insertSql,
+      chatHistory: table.chatHistory,
+    });
+    setShowReuse(false);
+  };
+
   return (
     <div className="flex-shrink-0 border-t border-slate-200 bg-white">
       <div className="max-w-4xl mx-auto px-4 sm:px-6 py-3">
@@ -68,7 +99,68 @@ export default function ChatInput() {
             <BarChart3 className="w-3 h-3" />
             添加指标
           </button>
+          {mode === 'etl' && reusableTables.length > 0 && (
+            <button
+              onClick={() => setShowReuse(!showReuse)}
+              className={`flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium rounded-md transition-colors cursor-pointer ml-auto ${
+                showReuse
+                  ? 'bg-amber-50 text-amber-700 border border-amber-200'
+                  : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50 border border-transparent'
+              }`}
+            >
+              <Repeat2 className="w-3 h-3" />
+              复用加工逻辑
+            </button>
+          )}
         </div>
+
+        {/* Reuse panel */}
+        {showReuse && (
+          <div className="mb-2 bg-amber-50/50 border border-amber-200 rounded-lg p-2 max-h-48 overflow-y-auto">
+            <p className="text-[10px] text-amber-700 font-medium mb-1.5">点击「查看血缘」预览加工逻辑，确认后点「复用」：</p>
+            <div className="space-y-1">
+              {reusableTables.map(t => (
+                <div
+                  key={t.id + t.dashboardId}
+                  className="flex items-center gap-2 px-2.5 py-2 rounded-md bg-white border border-amber-100 hover:border-amber-300 transition-colors"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-slate-800">{t.database}.{t.table}</span>
+                      <span className="text-[10px] text-slate-400">{getDashboardName(t.dashboardId)}</span>
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-0.5 truncate">
+                      来源：{t.sourceTables.join(', ') || '未知'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setPreviewTable(t)}
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-indigo-600 bg-indigo-50 rounded hover:bg-indigo-100 transition-colors cursor-pointer flex-shrink-0"
+                  >
+                    <Eye className="w-3 h-3" />
+                    查看血缘
+                  </button>
+                  <button
+                    onClick={() => handleReuse(t)}
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-amber-700 bg-amber-100 rounded hover:bg-amber-200 transition-colors cursor-pointer flex-shrink-0"
+                  >
+                    <Repeat2 className="w-3 h-3" />
+                    复用
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Lineage preview modal */}
+        {previewTable && (
+          <LineageModal
+            table={previewTable}
+            onClose={() => setPreviewTable(null)}
+            onAddMetric={() => {}}
+          />
+        )}
 
         {/* Input area */}
         <div className="flex items-end gap-3 bg-slate-50 rounded-xl border border-slate-200 p-2 focus-within:border-indigo-300 focus-within:ring-2 focus-within:ring-indigo-100 transition-all">

@@ -489,6 +489,103 @@ def _build_metric_lineage_from_data(
     return {'layers': layers, 'edges': edges, 'summary': summary}
 
 
+# ────────── POST /api/lineage/summary — 从对话历史总结加工逻辑 ──────────
+
+_summary_cache: dict[str, dict] = {}
+
+
+@router.post("/api/lineage/summary")
+async def lineage_summary(request_body: dict):
+    """根据对话历史和加工 SQL，总结出可复用的加工逻辑描述。"""
+    chat_history = request_body.get('chatHistory', [])
+    insert_sql = request_body.get('insertSql', '')
+    target_table = request_body.get('targetTable', '')
+    source_tables = request_body.get('sourceTables', [])
+
+    if not chat_history and not insert_sql:
+        return JSONResponse(status_code=400, content={"error": "缺少对话历史或加工 SQL"})
+
+    if not LLM_API_KEY:
+        return JSONResponse(status_code=503, content={"error": "LLM API 未配置"})
+
+    # 缓存
+    cache_key = _make_cache_key({
+        'type': 'lineage-summary',
+        'sql': insert_sql,
+        'target': target_table,
+    })
+    if cache_key in _summary_cache:
+        return _summary_cache[cache_key]
+
+    # 精简对话历史（只保留最近 30 轮，避免 token 过长）
+    trimmed_history = chat_history[-30:] if len(chat_history) > 30 else chat_history
+    conversation_text = '\n'.join(
+        f'{"用户" if m.get("role") == "user" else "助手"}: {m.get("content", "")[:500]}'
+        for m in trimmed_history
+    )
+
+    system_prompt = f'''你是一个数据加工流程分析专家。请根据以下用户与 ETL 助手的对话记录和最终生成的加工 SQL，总结出一套完整的、可复用的数据加工逻辑。
+
+**目标表**: {target_table}
+**来源表**: {', '.join(source_tables) if source_tables else '见 SQL'}
+
+**最终加工 SQL**:
+```sql
+{insert_sql}
+```
+
+**对话记录**:
+{conversation_text}
+
+请输出 JSON（不要 markdown 代码块），格式如下：
+{{
+  "title": "一句话概括这个加工任务（如：合并收入成本数据并关联公司和利润中心维表）",
+  "purpose": "加工目的：为什么要做这个加工，解决什么业务问题",
+  "steps": [
+    "步骤1：具体描述（如：从事实表 xxx 中取出基础字段 bic_zsys_id, ctgry, gjahr 等）",
+    "步骤2：具体描述（如：LEFT JOIN 公司代码维表 xxx，通过 sysid 和 bukrs 关联，获取公司名称）",
+    "步骤3：..."
+  ],
+  "keyLogic": [
+    "关键逻辑1：描述重要的加工规则（如：公司代码匹配时需同时满足 sysid 和 bukrs 两个条件）",
+    "关键逻辑2：..."
+  ],
+  "reuseTips": "复用建议：说明这套逻辑可以如何复用到类似场景（如：同类维表关联可复用 JOIN 条件模板）"
+}}
+
+**要求**：
+- 用中文，语言简洁专业
+- steps 要按实际加工顺序描述，每步说清楚做了什么、用了哪张表、关联条件是什么
+- keyLogic 提炼出容易出错或需要特别注意的逻辑点
+- 基于对话中用户的真实意图和助手的实际操作来总结，不要编造'''
+
+    try:
+        result = await call_llm(
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': '请总结这次数据加工的完整逻辑。'},
+            ],
+            temperature=0.2,
+            max_tokens=2048,
+        )
+        if not result.get('ok'):
+            return JSONResponse(
+                status_code=result.get('status', 500),
+                content={"error": result.get('error', '总结失败')},
+            )
+
+        content = (result.get('content') or '').strip()
+        json_match = re.search(r'\{[\s\S]*\}', content)
+        if not json_match:
+            return {"title": "加工逻辑摘要", "steps": [content], "keyLogic": [], "reuseTips": ""}
+
+        parsed = json.loads(json_match.group(0))
+        _summary_cache[cache_key] = parsed
+        return parsed
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 # ────────── POST /api/lineage — 解析 SQL 返回数据血缘 ──────────
 
 @router.post("/api/lineage")

@@ -32,6 +32,7 @@ async def chat(request_body: dict):
             'connection_test_ok': False,
             'render_blocks': {},
             'llm_response': {},
+            'reuse_context': context.get('reuseContext'),
         }
         result = await graph.ainvoke(initial_state)
         response = result.get('llm_response', {})

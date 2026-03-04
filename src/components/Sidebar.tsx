@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, LayoutDashboard, Trash2, BarChart3, ChevronRight, ChevronDown } from 'lucide-react';
+import { Plus, LayoutDashboard, Trash2, BarChart3, ChevronRight, ChevronDown, Pencil } from 'lucide-react';
 import { useDashboardStore } from '../dashboardStore';
 import { useMetricDefStore } from '../metricDefStore';
 import type { MetricDef } from '../types';
@@ -10,6 +10,7 @@ export default function Sidebar({ onViewMetric }: { onViewMetric?: (def: MetricD
   const openDashboard = useDashboardStore(s => s.openDashboard);
   const createDashboard = useDashboardStore(s => s.createDashboard);
   const deleteDashboard = useDashboardStore(s => s.deleteDashboard);
+  const renameDashboard = useDashboardStore(s => s.renameDashboard);
 
   const allMetricDefs = useMetricDefStore(s => s.defs);
   const removeMetricDef = useMetricDefStore(s => s.remove);
@@ -19,6 +20,8 @@ export default function Sidebar({ onViewMetric }: { onViewMetric?: (def: MetricD
   const [hovered, setHovered] = useState<string | null>(null);
   const [hoveredMetric, setHoveredMetric] = useState<string | null>(null);
   const [expandedDashboards, setExpandedDashboards] = useState<Set<string>>(new Set());
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
 
   const handleCreate = () => {
     const name = newName.trim();
@@ -123,12 +126,48 @@ export default function Sidebar({ onViewMetric }: { onViewMetric?: (def: MetricD
                 )}
                 <div className="flex-1 min-w-0 flex items-center gap-1.5" onClick={() => openDashboard(db.id)}>
                   <LayoutDashboard className={`w-3.5 h-3.5 flex-shrink-0 ${isActive ? 'text-indigo-500' : 'text-slate-400'}`} />
-                  <span className="flex-1 truncate text-xs">{db.name}</span>
-                  {metrics.length > 0 && (
+                  {editingId === db.id ? (
+                    <input
+                      autoFocus
+                      value={editName}
+                      onChange={e => setEditName(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          const name = editName.trim();
+                          if (name) renameDashboard(db.id, name);
+                          setEditingId(null);
+                        }
+                        if (e.key === 'Escape') setEditingId(null);
+                      }}
+                      onBlur={() => {
+                        const name = editName.trim();
+                        if (name) renameDashboard(db.id, name);
+                        setEditingId(null);
+                      }}
+                      onClick={e => e.stopPropagation()}
+                      className="flex-1 min-w-0 px-1.5 py-0.5 text-xs rounded border border-indigo-300 focus:outline-none focus:ring-1 focus:ring-indigo-200"
+                    />
+                  ) : (
+                    <span
+                      className="flex-1 truncate text-xs"
+                      onDoubleClick={e => { e.stopPropagation(); setEditingId(db.id); setEditName(db.name); }}
+                    >
+                      {db.name}
+                    </span>
+                  )}
+                  {metrics.length > 0 && editingId !== db.id && (
                     <span className="text-[10px] text-slate-400 bg-slate-100 rounded px-1">{metrics.length}</span>
                   )}
                 </div>
-                {hovered === db.id && (
+                {hovered === db.id && editingId !== db.id && (
+                  <button
+                    onClick={e => { e.stopPropagation(); setEditingId(db.id); setEditName(db.name); }}
+                    className="p-1 rounded text-slate-400 hover:text-indigo-500 hover:bg-indigo-50 transition-colors cursor-pointer flex-shrink-0"
+                  >
+                    <Pencil className="w-3 h-3" />
+                  </button>
+                )}
+                {hovered === db.id && editingId !== db.id && (
                   <button
                     onClick={e => { e.stopPropagation(); deleteDashboard(db.id); }}
                     className="p-1 rounded text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors cursor-pointer flex-shrink-0"

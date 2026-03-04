@@ -1,9 +1,18 @@
 import { create } from 'zustand';
-import type { ChatMessage, ContentBlock, EtlStep } from './types';
+import type { ChatMessage, ContentBlock, EtlStep, FieldMapping } from './types';
 import type { ConversationTurn } from './api';
 import { fetchChatWithModel } from './api';
 import { useProcessedTableStore } from './processedTableStore';
 import { useSchemaStore } from './schemaStore';
+
+export interface ReuseContext {
+  database: string;
+  table: string;
+  sourceTables: string[];
+  fieldMappings: FieldMapping[];
+  insertSql: string;
+  chatHistory?: { role: string; content: string }[];
+}
 
 let msgId = 0;
 const nextId = () => `msg-${++msgId}`;
@@ -11,8 +20,11 @@ const nextId = () => `msg-${++msgId}`;
 function sysMsg(...contents: ContentBlock[]): ChatMessage {
   return { id: nextId(), role: 'system', contents, timestamp: Date.now() };
 }
-function userMsg(text: string): ChatMessage {
-  return { id: nextId(), role: 'user', contents: [{ type: 'text', text }], timestamp: Date.now() };
+function userMsg(text: string, extraBlocks?: ContentBlock[]): ChatMessage {
+  const contents: ContentBlock[] = [];
+  if (extraBlocks) contents.push(...extraBlocks);
+  contents.push({ type: 'text', text });
+  return { id: nextId(), role: 'user', contents, timestamp: Date.now() };
 }
 
 interface AppState {
@@ -23,7 +35,7 @@ interface AppState {
   isProcessing: boolean;
 
   loadForDashboard: (dashboardId: string) => void;
-  sendMessage: (text: string) => void;
+  sendMessage: (text: string, reuseContext?: ReuseContext) => void;
   reset: () => void;
 }
 
@@ -159,16 +171,32 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  sendMessage: (text: string) => {
+  sendMessage: (text: string, reuseContext?: ReuseContext) => {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed && !reuseContext) return;
 
     const { messages, step, dashboardId } = get();
-    const newMessages = [...messages, userMsg(trimmed)];
+
+    // Build user message with optional reuse card
+    let userText = trimmed;
+    const extraBlocks: ContentBlock[] = [];
+    if (reuseContext) {
+      extraBlocks.push({
+        type: 'reuse_card',
+        database: reuseContext.database,
+        table: reuseContext.table,
+        sourceTables: reuseContext.sourceTables,
+      });
+      if (!userText) {
+        userText = `请参考 ${reuseContext.database}.${reuseContext.table} 的加工逻辑，对当前选中的库表做类似的加工`;
+      }
+    }
+
+    const newMessages = [...messages, userMsg(userText, extraBlocks.length > 0 ? extraBlocks : undefined)];
     set({ messages: newMessages, isProcessing: true });
     persistState({ ...get(), messages: newMessages });
 
-    if (step === 1 && wantsDemoGuide(trimmed)) {
+    if (step === 1 && wantsDemoGuide(userText)) {
       const demoList = getDemoConversationMessages();
       let idx = 0;
       const run = () => {
@@ -209,6 +237,7 @@ export const useStore = create<AppState>((set, get) => ({
           connectionString: get().connectionString || undefined,
           currentStep: get().step,
           selectedTables: selected.length > 0 ? selected : undefined,
+          reuseContext: reuseContext || undefined,
         });
 
         const updatedMessages = [...get().messages];
@@ -216,8 +245,8 @@ export const useStore = create<AppState>((set, get) => ({
 
         const updates: Partial<AppState> = { messages: updatedMessages, isProcessing: false };
 
-        if (res.connectionReceived && looksLikeConnectionString(trimmed)) {
-          updates.connectionString = trimmed;
+        if (res.connectionReceived && looksLikeConnectionString(userText)) {
+          updates.connectionString = userText;
           // 自动加载库表树
           useSchemaStore.getState().fetchTree(trimmed);
         }
@@ -232,6 +261,17 @@ export const useStore = create<AppState>((set, get) => ({
         const dashId = get().dashboardId;
         if (dashId && res.processedTable) {
           const pt = res.processedTable;
+          // 提取对话历史用于加工逻辑摘要
+          const chatHistory = get().messages
+            .filter(m => !m.id.startsWith('demo-') && m.id !== 'intro')
+            .map(m => ({
+              role: m.role === 'user' ? 'user' : 'assistant',
+              content: m.contents
+                .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+                .map(c => c.text).join('\n').trim(),
+            }))
+            .filter(m => m.content);
+
           useProcessedTableStore.getState().addOrUpdate({
             dashboardId: dashId,
             database: pt.database,
@@ -239,8 +279,22 @@ export const useStore = create<AppState>((set, get) => ({
             sourceTables: pt.sourceTables,
             fieldMappings: pt.fieldMappings || [],
             insertSql: pt.insertSql,
+            chatHistory,
             processedAt: Date.now(),
           });
+
+          // 刷新库表树并自动勾选新加工的表
+          const connStr = get().connectionString;
+          if (connStr) {
+            const schema = useSchemaStore.getState();
+            await schema.fetchTree(connStr);
+            const tableKey = `${pt.database}.${pt.table}`;
+            if (!schema.selectedTables.has(tableKey)) {
+              schema.toggleTable(pt.database, pt.table);
+            }
+            // 自动展开该库
+            schema.expandDb(pt.database);
+          }
         }
       } catch (err) {
         const updatedMessages = [...get().messages];

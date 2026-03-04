@@ -33,6 +33,7 @@ class ETLChatState(TypedDict):
     selected_tables: list
     render_blocks: dict
     llm_response: dict
+    reuse_context: Optional[dict]
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +102,7 @@ async def parse_input(state: dict) -> dict:
         "current_step_hint": current_step_hint,
         "selected_tables": selected_tables,
         "render_blocks": {},
+        "reuse_context": state.get("reuse_context"),
     }
 
 
@@ -149,6 +151,7 @@ async def tool_calling_loop_node(state: dict) -> dict:
     connection_test_ok = state.get("connection_test_ok", False)
     selected_tables = state.get("selected_tables", [])
     current_step_hint = state.get("current_step_hint", 0)
+    reuse_context = state.get("reuse_context")
 
     render_blocks = {}
     block_counter = [1]  # 可变计数器
@@ -164,8 +167,53 @@ async def tool_calling_loop_node(state: dict) -> dict:
             "当用户说「看看有哪些表」「有哪些库」时，只展示选中范围内的库表。\n"
         )
 
+    reuse_note = ""
+    if reuse_context and isinstance(reuse_context, dict):
+        reuse_db = reuse_context.get("database", "")
+        reuse_tbl = reuse_context.get("table", "")
+        reuse_sources = reuse_context.get("sourceTables", [])
+        reuse_sql = reuse_context.get("insertSql", "")
+        reuse_mappings = reuse_context.get("fieldMappings", [])
+        reuse_chat = reuse_context.get("chatHistory", [])
+
+        reuse_parts = [
+            "\n**【复用加工逻辑参考】**",
+            "用户选择了一个已有的加工表作为参考，请基于以下信息帮助用户对当前选中的库表做类似的加工。",
+            f"参考加工表：{reuse_db}.{reuse_tbl}",
+            f"参考来源表：{', '.join(reuse_sources) if reuse_sources else '未知'}",
+        ]
+        if reuse_sql:
+            reuse_parts.append(f"参考加工 SQL：\n{reuse_sql}")
+        if reuse_mappings:
+            mapping_lines = []
+            for m in reuse_mappings:
+                mapping_lines.append(
+                    "  - %s <- %s.%s (%s)" % (
+                        m.get("targetField", ""),
+                        m.get("sourceTable", ""),
+                        m.get("sourceExpr", ""),
+                        m.get("transform", ""),
+                    )
+                )
+            reuse_parts.append("参考字段映射：\n" + "\n".join(mapping_lines))
+        if reuse_chat:
+            chat_lines = []
+            for msg in reuse_chat[-20:]:
+                role_label = "用户" if msg.get("role") == "user" else "助手"
+                content = msg.get("content", "")
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                chat_lines.append(f"  [{role_label}] {content}")
+            reuse_parts.append("参考对话历史（展示用户的加工思路）：\n" + "\n".join(chat_lines))
+        reuse_parts.append(
+            "\n请参考以上加工逻辑，结合用户当前选中的库表，生成类似的加工方案。"
+            "注意：参考表的库名、表名、字段名可能与当前不同，需要根据当前实际表结构做适配。"
+            "先调用工具查看当前选中表的结构，再生成对应的建表和映射 SQL。\n"
+        )
+        reuse_note = "\n".join(reuse_parts)
+
     system_prompt = f"""你是智能数据 ETL 助手，帮助用户通过对话完成完整的 ETL 流程。
-{selected_tables_note}
+{selected_tables_note}{reuse_note}
 **你有一个工具 `execute_sql`**，可以在用户的 MySQL 数据库上执行任意 SQL。需要查数据、建库、建表、写入数据时，直接调用工具执行 SQL 即可。你可以多次调用工具来完成多步操作（如先建库再建表）。**当有多条互相独立的 SQL 需要执行时（如同时查看多张表的结构、同时预览多张表的数据），你应该在同一轮回复中同时调用多次工具，系统会并行执行，大幅提升效率。**
 
 **步骤自动判断**：ETL 流程有 6 步：1-连接数据库、2-选择基表、3-定义目标表、4-字段映射、5-数据验证、6-异常溯源。

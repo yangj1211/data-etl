@@ -178,7 +178,24 @@ function TextBlock({ text }: { text: string }) {
 
 function ContentBlockRenderer({ block }: { block: ContentBlock }) {
   if (block.type === 'text') return <TextBlock text={block.text} />;
+  if (block.type === 'reuse_card') return <ReuseCard database={block.database} table={block.table} sourceTables={block.sourceTables} />;
   return null;
+}
+
+function ReuseCard({ database, table, sourceTables }: { database: string; table: string; sourceTables: string[] }) {
+  return (
+    <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg mb-1">
+      <div className="w-5 h-5 rounded bg-amber-100 flex items-center justify-center flex-shrink-0">
+        <span className="text-amber-600 text-[10px] font-bold">复</span>
+      </div>
+      <div className="flex-1 min-w-0">
+        <span className="text-xs font-medium text-amber-800">{database}.{table}</span>
+        {sourceTables.length > 0 && (
+          <p className="text-[10px] text-amber-600 truncate">来源：{sourceTables.join(', ')}</p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function ChatMessage({ message }: { message: Msg }) {
@@ -188,8 +205,11 @@ export default function ChatMessage({ message }: { message: Msg }) {
     return (
       <div className="flex justify-end gap-3 msg-enter px-4 sm:px-0">
         <div className="max-w-md">
-          <div className="bg-indigo-600 text-white rounded-2xl rounded-tr-sm px-5 py-3 shadow-sm">
-            <p className="text-sm leading-relaxed whitespace-pre-wrap">{(message.contents[0] as { type: 'text'; text: string }).text}</p>
+          <div className="bg-indigo-600 text-white rounded-2xl rounded-tr-sm px-5 py-3 shadow-sm space-y-2">
+            {message.contents.map((block, i) => {
+              if (block.type === 'reuse_card') return <ReuseCard key={i} database={block.database} table={block.table} sourceTables={block.sourceTables} />;
+              return <p key={i} className="text-sm leading-relaxed whitespace-pre-wrap">{block.text}</p>;
+            })}
           </div>
         </div>
         <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-600 to-slate-700 flex items-center justify-center flex-shrink-0 mt-1">

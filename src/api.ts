@@ -16,6 +16,15 @@ export interface ChatContext {
   currentStep?: number;
   /** 用户选中的库表列表（格式 db.table） */
   selectedTables?: string[];
+  /** 复用加工逻辑上下文 */
+  reuseContext?: {
+    database: string;
+    table: string;
+    sourceTables: string[];
+    fieldMappings: { targetField: string; sourceTable: string; sourceExpr: string; transform: string }[];
+    insertSql: string;
+    chatHistory?: { role: string; content: string }[];
+  };
 }
 
 import type { ChartType } from './types';
@@ -348,6 +357,40 @@ export async function fetchLineage(payload: {
     throw new Error((err as { error?: string }).error || `HTTP ${res.status}`);
   }
   const data: LineageResponse = await res.json();
+  _lineageCache.set(key, data);
+  return data;
+}
+
+// ────────── 加工逻辑摘要 API ──────────
+
+export interface LineageSummary {
+  title: string;
+  purpose?: string;
+  steps: string[];
+  keyLogic: string[];
+  reuseTips?: string;
+}
+
+export async function fetchLineageSummary(payload: {
+  chatHistory: { role: string; content: string }[];
+  insertSql: string;
+  targetTable: string;
+  sourceTables: string[];
+}): Promise<LineageSummary> {
+  const key = _cacheKey({ type: 'lineage-summary', sql: payload.insertSql, target: payload.targetTable });
+  const cached = _lineageCache.get(key);
+  if (cached) return cached as LineageSummary;
+
+  const res = await fetch('/api/lineage/summary', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((err as { error?: string }).error || `HTTP ${res.status}`);
+  }
+  const data: LineageSummary = await res.json();
   _lineageCache.set(key, data);
   return data;
 }
