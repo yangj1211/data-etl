@@ -14,6 +14,7 @@ async def metric_chat(request_body: dict):
     conversation = request_body.get('conversation')
     connection_string = request_body.get('connectionString')
     selected_tables = request_body.get('selectedTables', [])
+    processed_tables = request_body.get('processedTables', [])
 
     if not isinstance(conversation, list) or len(conversation) == 0:
         return JSONResponse(status_code=400, content={"error": "Missing conversation"})
@@ -24,6 +25,7 @@ async def metric_chat(request_body: dict):
             'conversation': conversation,
             'connection_string': connection_string,
             'selected_tables': selected_tables if isinstance(selected_tables, list) else [],
+            'processed_tables': processed_tables if isinstance(processed_tables, list) else [],
             'schema_context': '',
             'render_blocks': {},
             'llm_response': {},

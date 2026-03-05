@@ -33,6 +33,13 @@ interface MetricState {
       measureField: string;
     }[];
     connectionString: string;
+    processedTables?: {
+      database: string;
+      table: string;
+      sourceTables: string[];
+      fieldMappings: { targetField: string; sourceTable: string; sourceExpr: string; transform: string }[];
+      insertSql: string;
+    }[];
   }) => Promise<{ sql: string; chartType: ChartType; explanation: string; derivedMetricDef?: { name: string; definition: string; tables: string[]; aggregation: string; measureField: string } | null }>;
   confirmMetric: (opts: {
     dashboardId: string;
@@ -58,10 +65,10 @@ export const useMetricStore = create<MetricState>((set, get) => ({
 
   getByDashboard: (dashboardId) => get().metrics.filter(m => m.dashboardId === dashboardId),
 
-  generateMetric: async ({ dashboardId, name, description, metricDefs, connectionString }) => {
+  generateMetric: async ({ dashboardId, name, description, metricDefs, connectionString, processedTables }) => {
     set({ generating: true, error: null });
     try {
-      const result = await fetchMetricGenerate({ metricName: name, description, metricDefs, connectionString });
+      const result = await fetchMetricGenerate({ metricName: name, description, metricDefs, connectionString, processedTables });
       set({ generating: false });
       return result;
     } catch (e) {

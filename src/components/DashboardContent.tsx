@@ -7,6 +7,7 @@ import { useStore } from '../store';
 import MetricCard, { isCompactMetric } from './MetricCard';
 import AddMetricModal from './AddMetricModal';
 import LineageModal from './LineageModal';
+import ErrorBoundary from './ErrorBoundary';
 import type { ProcessedTable } from '../types';
 
 export default function DashboardContent() {
@@ -170,18 +171,22 @@ export default function DashboardContent() {
       </div>
 
       {showAdd && activeDashboardId && (
-        <AddMetricModal
-          dashboardId={activeDashboardId}
-          onClose={() => setShowAdd(false)}
-        />
+        <ErrorBoundary fallbackLabel="添加监控数据">
+          <AddMetricModal
+            dashboardId={activeDashboardId}
+            onClose={() => setShowAdd(false)}
+          />
+        </ErrorBoundary>
       )}
 
       {lineageTable && (
-        <LineageModal
-          table={lineageTable}
-          onClose={() => setLineageTable(null)}
-          onAddMetric={(_tableId: string) => { setLineageTable(null); setShowAdd(true); }}
-        />
+        <ErrorBoundary fallbackLabel="数据血缘">
+          <LineageModal
+            table={lineageTable}
+            onClose={() => setLineageTable(null)}
+            onAddMetric={(_tableId: string) => { setLineageTable(null); setShowAdd(true); }}
+          />
+        </ErrorBoundary>
       )}
     </div>
   );

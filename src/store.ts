@@ -4,6 +4,7 @@ import type { ConversationTurn } from './api';
 import { fetchChatWithModel } from './api';
 import { useProcessedTableStore } from './processedTableStore';
 import { useSchemaStore } from './schemaStore';
+import { useConnectionStore } from './connectionStore';
 
 export interface ReuseContext {
   database: string;
@@ -159,9 +160,10 @@ export const useStore = create<AppState>((set, get) => ({
         messages: saved.messages,
         isProcessing: false,
       });
-      // 恢复连接后自动加载库表树
+      // 恢复连接后自动加载库表树，并保存到历史连接
       if (saved.connectionString) {
         useSchemaStore.getState().fetchTree(saved.connectionString);
+        useConnectionStore.getState().save(saved.connectionString);
       }
     } else {
       set({
@@ -188,8 +190,10 @@ export const useStore = create<AppState>((set, get) => ({
         sourceTables: reuseContext.sourceTables,
       });
       if (!userText) {
-        userText = `请参考 ${reuseContext.database}.${reuseContext.table} 的加工逻辑，对当前选中的库表做类似的加工`;
+        userText = `一键复用 ${reuseContext.database}.${reuseContext.table} 的加工逻辑，请直接生成加工方案`;
       }
+      // 复用模式直接跳到字段映射步骤
+      set({ step: 4 as EtlStep });
     }
 
     const newMessages = [...messages, userMsg(userText, extraBlocks.length > 0 ? extraBlocks : undefined)];
@@ -247,6 +251,8 @@ export const useStore = create<AppState>((set, get) => ({
 
         if (res.connectionReceived && looksLikeConnectionString(userText)) {
           updates.connectionString = userText;
+          // 自动保存连接串
+          useConnectionStore.getState().save(userText);
           // 自动加载库表树
           useSchemaStore.getState().fetchTree(trimmed);
         }
@@ -283,17 +289,30 @@ export const useStore = create<AppState>((set, get) => ({
             processedAt: Date.now(),
           });
 
-          // 刷新库表树并自动勾选新加工的表
+          // 刷新库表树并自动勾选新加工的表 + 基表
           const connStr = get().connectionString;
           if (connStr) {
             const schema = useSchemaStore.getState();
             await schema.fetchTree(connStr);
+            // 勾选新加工的目标表
             const tableKey = `${pt.database}.${pt.table}`;
             if (!schema.selectedTables.has(tableKey)) {
               schema.toggleTable(pt.database, pt.table);
             }
-            // 自动展开该库
             schema.expandDb(pt.database);
+            // 自动勾选所有基表
+            if (pt.sourceTables && Array.isArray(pt.sourceTables)) {
+              for (const src of pt.sourceTables) {
+                const parts = src.split('.');
+                if (parts.length === 2) {
+                  const [srcDb, srcTbl] = parts;
+                  if (!schema.selectedTables.has(src)) {
+                    schema.toggleTable(srcDb, srcTbl);
+                  }
+                  schema.expandDb(srcDb);
+                }
+              }
+            }
           }
         }
       } catch (err) {

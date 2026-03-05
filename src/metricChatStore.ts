@@ -3,6 +3,7 @@ import type { ChatMessage } from './types';
 import { useMetricDefStore } from './metricDefStore';
 import { useDashboardStore } from './dashboardStore';
 import { useSchemaStore } from './schemaStore';
+import { useProcessedTableStore } from './processedTableStore';
 
 let msgId = 0;
 const nextId = () => `mc-${++msgId}`;
@@ -109,7 +110,20 @@ export const useMetricChatStore = create<MetricChatState>((set, get) => ({
         const res = await fetch('/api/metric-chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ conversation, connectionString, selectedTables: Array.from(useSchemaStore.getState().selectedTables) }),
+          body: JSON.stringify({
+            conversation,
+            connectionString,
+            selectedTables: Array.from(useSchemaStore.getState().selectedTables),
+            processedTables: (get().dashboardId
+              ? useProcessedTableStore.getState().getByDashboard(get().dashboardId!).map(pt => ({
+                  database: pt.database,
+                  table: pt.table,
+                  sourceTables: pt.sourceTables,
+                  fieldMappings: pt.fieldMappings,
+                  insertSql: pt.insertSql,
+                }))
+              : []),
+          }),
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: res.statusText }));

@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar';
 import DashboardContent from './components/DashboardContent';
 import AgentPanel from './components/AgentPanel';
 import MetricDefDetailModal from './components/MetricDefDetailModal';
+import ErrorBoundary from './components/ErrorBoundary';
 import { useDashboardStore } from './dashboardStore';
 import { PanelRightOpen } from 'lucide-react';
 import type { MetricDef } from './types';
@@ -17,7 +18,9 @@ export default function App() {
       <Sidebar onViewMetric={setViewingMetric} />
 
       <main className="flex-1 min-w-0 border-r border-slate-200 relative">
-        <DashboardContent />
+        <ErrorBoundary fallbackLabel="Dashboard">
+          <DashboardContent />
+        </ErrorBoundary>
         {/* 收起状态下的展开按钮 */}
         {activeDashboardId && !agentOpen && (
           <button
@@ -32,12 +35,16 @@ export default function App() {
 
       {activeDashboardId && agentOpen && (
         <aside className="w-[560px] flex-shrink-0 bg-white">
-          <AgentPanel onCollapse={() => setAgentOpen(false)} />
+          <ErrorBoundary fallbackLabel="Agent 面板">
+            <AgentPanel onCollapse={() => setAgentOpen(false)} />
+          </ErrorBoundary>
         </aside>
       )}
 
       {viewingMetric && (
-        <MetricDefDetailModal def={viewingMetric} onClose={() => setViewingMetric(null)} />
+        <ErrorBoundary fallbackLabel="指标详情">
+          <MetricDefDetailModal def={viewingMetric} onClose={() => setViewingMetric(null)} />
+        </ErrorBoundary>
       )}
     </div>
   );

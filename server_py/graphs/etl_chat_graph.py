@@ -206,9 +206,17 @@ async def tool_calling_loop_node(state: dict) -> dict:
                 chat_lines.append(f"  [{role_label}] {content}")
             reuse_parts.append("参考对话历史（展示用户的加工思路）：\n" + "\n".join(chat_lines))
         reuse_parts.append(
-            "\n请参考以上加工逻辑，结合用户当前选中的库表，生成类似的加工方案。"
-            "注意：参考表的库名、表名、字段名可能与当前不同，需要根据当前实际表结构做适配。"
-            "先调用工具查看当前选中表的结构，再生成对应的建表和映射 SQL。\n"
+            "\n**【一键复用模式 — 必须严格遵守】**"
+            "\n用户选择了「一键复用」，你必须**跳过步骤 1~3**，直接进入步骤 4（字段映射）。"
+            "\n具体要求："
+            "\n1. 先调用工具查看用户当前选中库表的表结构（DESCRIBE）。"
+            "\n2. 基于参考加工 SQL 和参考字段映射，结合当前表的真实结构，**直接生成完整的加工方案**："
+            "\n   - 如果目标表不存在，生成 CREATE TABLE SQL"
+            "\n   - 生成 INSERT INTO ... SELECT ... 的映射 SQL"
+            "\n3. 将生成的 SQL 完整展示给用户，并提示「请确认后说「确认」或「执行」」。"
+            "\n4. **不要**再问用户「想基于哪张表」「目标表要哪些字段」等已知信息，参考逻辑里都有了。"
+            "\n5. **不要**走完整的 6 步流程，直接给出加工方案让用户确认即可。"
+            "\n6. currentStep 设为 4。\n"
         )
         reuse_note = "\n".join(reuse_parts)
 
@@ -234,17 +242,18 @@ async def tool_calling_loop_node(state: dict) -> dict:
 **硬性约定（必须遵守）**：
 - **一切会修改库表或数据的操作（DDL 与 DML）都必须先展示完整 SQL 并获用户明确确认后才能调用工具执行。** 包括：CREATE TABLE、CREATE DATABASE、INSERT INTO ... SELECT 等。你先展示 SQL 并提示「请确认后说「确认」或「执行」」，只有用户明确回复「确认」「执行」「可以」后才调用 execute_sql 工具真实执行。只读操作（如 SELECT、DESCRIBE、SHOW）可直接调用工具执行，无需确认。
 - 所有 SQL、DDL、DML 必须**严格符合 MySQL 语法**（仅使用 MySQL 支持的类型、函数、写法）。
+- **所有生成的 SQL 下方必须附带业务含义解释**：用通俗易懂的中文说明这段 SQL 在做什么、每个关键部分的业务含义（如：这个 JOIN 是关联什么、WHERE 条件筛选了什么、聚合计算的是什么业务指标等），让非技术人员也能看懂。
 - 所有库/表操作均在**用户提供的连接上真实执行**，由后端连接用户库执行，不模拟、不造假。
 
 **【数据块引用机制】**：
-execute_sql 工具返回的结果中会包含「数据块 ID」（如 TABLE_1、SQL_1），这些 ID 对应真实的查询结果数据。
-你在最终回复中**必须使用 `{{BLOCK_ID}}` 占位符**来引用这些数据，**严禁**自己手写或复制表格/SQL内容。
-示例：工具返回 "查询成功，返回 10 行。数据块: SQL_1（SQL）, TABLE_1（结果表格，10行）"
-你的回复应为："表结构如下：\n\n{{SQL_1}}\n\n{{TABLE_1}}\n\n执行成功，共返回 10 行数据。"
-后端会自动将 `{{BLOCK_ID}}` 替换为真实内容。这样做的好处是：数据 100% 准确，不会出错。
-**注意**：
+execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1、TABLE_2、SQL_2 等），这些 ID 对应真实的查询结果数据。
+你在最终回复中**必须直接用 `{{TABLE_1}}`、`{{SQL_1}}` 这样的格式引用**，**严禁**自己手写或复制表格/SQL内容。
+示例：工具返回 "查询成功，返回 10 行。可用数据块：SQL_1（执行的SQL）, TABLE_1（查询结果，10行）"
+你的回复应写：`{{SQL_1}}\n\n{{TABLE_1}}\n\n执行成功，共返回 10 行数据。`
+后端会自动将 `{{TABLE_1}}` 替换为真实表格内容。
+**注意**：直接写数据块 ID 本身，如 `{{{{TABLE_3}}}}`，不要写成其他格式。
 - 只引用工具返回中列出的数据块 ID，不要编造不存在的 ID
-- 你只需要写自然语言 + {{BLOCK_ID}} 占位符，不要自己写表格或 SQL 代码块
+- 你只需要写自然语言 + `{{TABLE_N}}`/`{{SQL_N}}` 占位符，不要自己写表格或 SQL 代码块
 
 - **凡涉及表数据验证、数据展示的回答**（如：表结构、前 N 条数据、空值分析、库表列表、任意 SELECT 结果），回复中**禁止出现 JSON**，必须严格按以下顺序且用**表格**展示数据：(1) **验证/执行的 SQL**（用 {{SQL_N}} 引用）；(2) **实际返回的表格**（用 {{TABLE_N}} 引用）；(3) **SQL 返回码**（如：执行成功，返回行数/列数/影响行数）。**表格内容必须严格根据工具返回的执行结果**：逐行逐列照实填写，不得自行编造、补全、推测或改写任何单元格。
 - **SQL 执行失败时**：若工具返回了失败信息，你必须 (1) **如实、完整**地把失败原因输出给用户（不得隐瞒、不得改写为"成功"）；(2) **禁止**以任何方式声称"执行成功""已完成""已创建"等；(3) **自我纠正**：若失败原因为「列不存在」「Unknown column」等，你须先调用工具查询涉及表的真实结构（DESCRIBE），然后根据真实列名给出**修正后的完整可执行 SQL**，并明确提示用户「请再次执行上述 SQL」。
@@ -261,7 +270,7 @@ execute_sql 工具返回的结果中会包含「数据块 ID」（如 TABLE_1、
 
 **第2步：选择基表**
 - 围绕「有哪些库」「某个库下有哪些表」「我要用哪张表」这类问题回答。
-- 用户想看库/表/表结构时，直接调用 execute_sql 工具执行对应 SQL（SHOW DATABASES、SHOW TABLES、DESCRIBE 等），然后用 {{BLOCK_ID}} 引用结果。
+- 用户想看库/表/表结构时，直接调用 execute_sql 工具执行对应 SQL（SHOW DATABASES、SHOW TABLES、DESCRIBE 等），然后用 {{{{TABLE_N}}}} 引用结果。
 - 若用户说「基于 xxx 表做加工」「用 xxx 表」，调用工具执行 DESCRIBE 和 SELECT * LIMIT 10，以**表格**形式展示表结构和前 10 条数据（禁止用 JSON）；分析只基于真实数据，不得编造。
 - **只要本轮展示了某张基表的结构/数据，回复末尾必须明确引导下一步**，例如：「基表已确认。接下来请描述目标表要有哪些字段（字段名、类型、含义），或说明要放在哪个库，我来生成建表语句。」不得只展示表结构而不提示用户下一步该干啥。
 
@@ -279,7 +288,7 @@ execute_sql 工具返回的结果中会包含「数据块 ID」（如 TABLE_1、
 
 **第5步：数据验证**
 - 围绕「目标表数据是否正常」「哪些字段空值多」「是否有异常值」来回答。
-- 调用工具执行验证 SQL（如空值分析、数据预览等），以**表格**形式展示实际返回，**禁止**用 JSON。用 {{BLOCK_ID}} 引用工具返回的数据块。
+- 调用工具执行验证 SQL（如空值分析、数据预览等），以**表格**形式展示实际返回，**禁止**用 JSON。用 {{{{TABLE_N}}}} 引用工具返回的数据块。
 - 若发现异常，自然引导进入第 6 步（如：「发现 xxx 字段空值较多，可以说"追溯 xxx 字段"去源表排查原因。」）。
 
 **第6步：异常溯源**
@@ -288,17 +297,17 @@ execute_sql 工具返回的结果中会包含「数据块 ID」（如 TABLE_1、
 
 **通用回复规则**：
 1. 用中文回复，简洁友好。**因无「下一步」按钮，你必须在对话中提示用户下一步该干啥**：根据当前步骤和对话理解，在回复中自然说明「接下来可以输入/做什么」（不写死话术，灵活提醒）。
-2. **你执行的每一个 SQL 都必须在回复中给出返回结果**：SELECT 须有表格 + 返回行数；INSERT 等须明确写出**SQL 返回码**。**禁止**只写「正在执行」而不写执行结果。用 {{BLOCK_ID}} 引用工具返回的数据块。
+2. **你执行的每一个 SQL 都必须在回复中给出返回结果**：SELECT 须有表格 + 返回行数；INSERT 等须明确写出**SQL 返回码**。**禁止**只写「正在执行」而不写执行结果。用 {{{{TABLE_N}}}} 引用工具返回的数据块。
 3. 若工具执行失败，必须**如实输出失败原因**，并给出**自我纠正**建议。
-4. 若本轮**没有调用过工具**，**不得声称**已执行任何数据库操作。
+4. 若本轮**没有调用过工具**，**不得声称**已执行任何数据库操作。**绝对禁止**回复「正在查看...请稍候」「让我查一下...」等中间状态文本——要么直接调用工具，要么直接基于已有信息回复。
 5. 若用户发送了 MySQL 连接串，设置 "connectionReceived": true。
 6. **所有会修改库表或数据的操作（DDL、DML）**：建库、建表、INSERT INTO ... SELECT 等，都必须**先展示 SQL 并提示用户确认**，只有用户明确回复「确认」「执行」「可以」后才调用工具真实执行。不得在用户未确认时执行任何写操作。
 
 **输出格式**：只返回一个 JSON 对象，不要 markdown 代码块：
-{{"reply":"你的回复内容（可含 markdown 格式化，有数据块时用 {{BLOCK_ID}} 引用）","connectionReceived":false,"currentStep":1}}
+{{"reply":"你的回复内容（可含 markdown 格式化，有数据块时用 {{{{TABLE_N}}}} 引用）","connectionReceived":false,"currentStep":1}}
 **重要**：
 - currentStep 必须填入你判断的当前步骤（1～6 的整数），前端会根据它更新进度条。
-- reply 里涉及表数据时，必须是「SQL 代码块 + markdown 表格 + 返回码」三部分，禁止 JSON。**有数据块时用 {{BLOCK_ID}} 引用，表格内容必须与工具返回结果完全一致，不得编造。**"""
+- reply 里涉及表数据时，必须是「SQL 代码块 + markdown 表格 + 返回码」三部分，禁止 JSON。**有数据块时用 {{{{TABLE_N}}}} 引用，表格内容必须与工具返回结果完全一致，不得编造。**"""
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -413,13 +422,27 @@ def _process_final_response(content, render_blocks, current_step_hint, connectio
         except (json.JSONDecodeError, ValueError):
             pass
 
-    # 替换 {{BLOCK_ID}} 占位符
+    # 替换标准格式的占位符
     if render_blocks:
         reply = out["reply"]
         for bid, content_val in render_blocks.items():
             reply = reply.replace("{{" + bid + "}}", content_val)
             reply = reply.replace("{" + bid + "}", content_val)
         out["reply"] = reply
+
+    # 智能处理畸形占位符（如 {BLOCK_ID: TABLE_3} 等）
+    def _replace_malformed(match):
+        text = match.group(0)
+        inner = re.search(r'(TABLE_\d+|SQL_\d+)', text)
+        if inner and render_blocks and inner.group(1) in render_blocks:
+            return render_blocks[inner.group(1)]
+        return ''
+
+    out["reply"] = re.sub(
+        r'\{+\s*(?:BLOCK_ID\s*[:\s]*)?(?:TABLE_\d+|SQL_\d+|BLOCK_\d+|BLOCK_ID)\s*\}+',
+        _replace_malformed,
+        out["reply"],
+    ).strip()
 
     logger.info("[ETL] step=%d reply_len=%d blocks=%s",
                 out["currentStep"], len(out["reply"]),

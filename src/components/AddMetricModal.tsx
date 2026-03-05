@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Loader2, Sparkles, Check, X, BarChart3, ChevronDown, Search } from 'lucide-react';
 import { useMetricStore } from '../metricStore';
 import { useMetricDefStore } from '../metricDefStore';
+import { useProcessedTableStore } from '../processedTableStore';
 import { useStore } from '../store';
 import { fetchMetricMatch } from '../api';
 import type { ChartType, MetricDef } from '../types';
@@ -32,6 +33,8 @@ export default function AddMetricModal({ dashboardId, onClose }: Props) {
   const { generating, generateMetric, confirmMetric } = useMetricStore();
   const allDefs = useMetricDefStore(s => s.defs);
   const metricDefs = allDefs.filter(d => d.dashboardId === dashboardId);
+  const allProcessedTables = useProcessedTableStore(s => s.tables);
+  const processedTables = allProcessedTables.filter(t => t.dashboardId === dashboardId);
 
   const [step, setStep] = useState<Step>('form');
   const [name, setName] = useState('');
@@ -87,6 +90,13 @@ export default function AddMetricModal({ dashboardId, onClose }: Props) {
           aggregation: d.aggregation, measureField: d.measureField,
         })),
         connectionString: connectionString!,
+        processedTables: processedTables.map(pt => ({
+          database: pt.database,
+          table: pt.table,
+          sourceTables: pt.sourceTables,
+          fieldMappings: pt.fieldMappings,
+          insertSql: pt.insertSql,
+        })),
       });
       setSql(result.sql);
       setChartType(result.chartType);

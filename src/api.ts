@@ -197,6 +197,14 @@ export interface MetricGenerateRequest {
     measureField: string;
   }[];
   connectionString: string;
+  /** 已加工表信息，用于优先使用业务表、避免重复查基表已加工字段 */
+  processedTables?: {
+    database: string;
+    table: string;
+    sourceTables: string[];
+    fieldMappings: { targetField: string; sourceTable: string; sourceExpr: string; transform: string }[];
+    insertSql: string;
+  }[];
 }
 
 export interface MetricGenerateResponse {

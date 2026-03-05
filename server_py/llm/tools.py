@@ -22,8 +22,8 @@ EXECUTE_SQL_TOOL = {
         "name": "execute_sql",
         "description": (
             "在用户的 MySQL 数据库上执行 SQL 语句。"
-            "支持：SELECT、SHOW、DESCRIBE、CREATE DATABASE、CREATE TABLE、INSERT INTO...SELECT 等。"
-            "禁止：DROP、TRUNCATE、DELETE、UPDATE。"
+            "支持：SELECT、SHOW、DESCRIBE、CREATE DATABASE、CREATE TABLE、ALTER TABLE、INSERT INTO...SELECT、UPDATE 等。"
+            "禁止：DROP、TRUNCATE、DELETE。"
             "每次调用执行一条 SQL。你可以在同一轮回复中同时调用多次该工具来并行执行多条独立的 SQL（例如同时 DESCRIBE 多张表、同时查询多张表的数据），这样效率更高。"
         ),
         "parameters": {
@@ -41,8 +41,8 @@ EXECUTE_SQL_TOOL = {
 
 SQL_TOOLS = [EXECUTE_SQL_TOOL]
 
-# 禁止的 SQL 模式
-_FORBIDDEN = re.compile(r"\b(DROP|TRUNCATE|DELETE|UPDATE)\b", re.IGNORECASE)
+# 禁止的 SQL 模式（允许 UPDATE，ETL 流程需要用 ALTER TABLE + UPDATE）
+_FORBIDDEN = re.compile(r"\b(DROP|TRUNCATE|DELETE)\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ async def execute_tool_call(
 
     # 安全检查
     if _FORBIDDEN.search(sql):
-        return f"安全限制：禁止执行 DROP/TRUNCATE/DELETE/UPDATE 语句"
+        return f"安全限制：禁止执行 DROP/TRUNCATE/DELETE 语句"
 
     # 解析连接
     parsed = get_connection_config(connection_string)

@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react';
-import { SendHorizonal, Wrench, BarChart3, Repeat2, Eye } from 'lucide-react';
+import { SendHorizonal, Wrench, BarChart3, Repeat2, Eye, Database, X } from 'lucide-react';
 import { useStore } from '../store';
 import { useMetricChatStore } from '../metricChatStore';
 import { useChatModeStore } from '../chatModeStore';
 import { useProcessedTableStore } from '../processedTableStore';
 import { useDashboardStore } from '../dashboardStore';
+import { useConnectionStore } from '../connectionStore';
 import type { ProcessedTable } from '../types';
 import LineageModal from './LineageModal';
 
@@ -17,8 +18,12 @@ export default function ChatInput() {
 
   const etlProcessing = useStore(s => s.isProcessing);
   const etlSend = useStore(s => s.sendMessage);
+  const etlConnectionString = useStore(s => s.connectionString);
   const metricProcessing = useMetricChatStore(s => s.isProcessing);
   const metricSend = useMetricChatStore(s => s.sendMessage);
+
+  const savedConnections = useConnectionStore(s => s.connections);
+  const removeConnection = useConnectionStore(s => s.remove);
 
   const allProcessedTables = useProcessedTableStore(s => s.tables);
   const dashboards = useDashboardStore(s => s.dashboards);
@@ -71,6 +76,14 @@ export default function ChatInput() {
     });
     setShowReuse(false);
   };
+
+  const handleSelectConnection = (cs: string) => {
+    if (isProcessing) return;
+    sendMessage(cs);
+  };
+
+  // 未连接时显示历史连接串标签
+  const showConnectionTags = mode === 'etl' && !etlConnectionString && savedConnections.length > 0;
 
   return (
     <div className="flex-shrink-0 border-t border-slate-200 bg-white">
@@ -160,6 +173,38 @@ export default function ChatInput() {
             onClose={() => setPreviewTable(null)}
             onAddMetric={() => {}}
           />
+        )}
+
+        {/* Saved connections — inline tags, shown when not yet connected */}
+        {showConnectionTags && (
+          <div className="mb-2 flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] text-slate-400 flex items-center gap-1 mr-0.5">
+              <Database className="w-3 h-3" />
+              快速连接：
+            </span>
+            {savedConnections.map(c => (
+              <span
+                key={c.connectionString}
+                className="inline-flex items-center gap-1 max-w-[280px] group"
+              >
+                <button
+                  onClick={() => handleSelectConnection(c.connectionString)}
+                  disabled={isProcessing}
+                  className="px-2 py-0.5 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md hover:bg-emerald-100 hover:border-emerald-300 transition-colors cursor-pointer truncate disabled:opacity-50"
+                  title={c.connectionString}
+                >
+                  {c.label}
+                </button>
+                <button
+                  onClick={() => removeConnection(c.connectionString)}
+                  className="p-0.5 text-slate-300 hover:text-red-400 transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+                  title="删除"
+                >
+                  <X className="w-2.5 h-2.5" />
+                </button>
+              </span>
+            ))}
+          </div>
         )}
 
         {/* Input area */}

@@ -77,6 +77,7 @@ async def metric_generate(request_body: dict):
     description = request_body.get('description')
     metric_defs = request_body.get('metricDefs')
     connection_string = request_body.get('connectionString')
+    processed_tables = request_body.get('processedTables') or []
 
     if not metric_name or not description:
         return JSONResponse(status_code=400, content={"error": "Missing metricName or description"})
@@ -88,6 +89,46 @@ async def metric_generate(request_body: dict):
             if isinstance(md.get('tables'), list):
                 for t in md['tables']:
                     all_tables.add(t)
+
+    # 收集已加工表信息：哪些基表字段已被加工过
+    processed_info = ''
+    processed_table_names = set()  # 已加工的业务表名（db.table）
+    processed_field_set = set()    # 已加工的基表字段（sourceTable.sourceField）
+    source_tables_from_processed = set()  # 已加工表的基表
+
+    if isinstance(processed_tables, list) and len(processed_tables) > 0:
+        processed_parts = ['\n**【已加工的业务表】**（优先使用这些表）：']
+        for pt in processed_tables:
+            pt_db = pt.get('database', '')
+            pt_tbl = pt.get('table', '')
+            pt_full = f'{pt_db}.{pt_tbl}'
+            processed_table_names.add(pt_full)
+            pt_sources = pt.get('sourceTables', [])
+            pt_mappings = pt.get('fieldMappings', [])
+
+            for src in pt_sources:
+                source_tables_from_processed.add(src)
+
+            processed_parts.append(f'\n  业务表 {pt_full}（来源基表：{", ".join(pt_sources)}）')
+            if pt_mappings:
+                processed_parts.append('  已加工字段映射：')
+                for m in pt_mappings:
+                    src_table = m.get('sourceTable', '')
+                    src_expr = m.get('sourceExpr', '')
+                    target_field = m.get('targetField', '')
+                    transform = m.get('transform', '')
+                    processed_parts.append(f'    - {target_field} <- {src_table}.{src_expr} ({transform})')
+                    # 记录已加工的基表字段
+                    processed_field_set.add(f'{src_table}.{src_expr}')
+
+            # 把业务表也加入需要查结构的表
+            all_tables.add(pt_full)
+
+        processed_info = '\n'.join(processed_parts)
+
+    # 把基表也加入需要查结构的表（用于对比）
+    for src in source_tables_from_processed:
+        all_tables.add(src)
 
     # 获取所有涉及表的结构
     schema_info = ''
@@ -101,15 +142,28 @@ async def metric_generate(request_body: dict):
             result = await run_database_operation(connection_string, 'describeTable', params)
             if result['ok']:
                 cols = result['data'].get('columns') or []
-                col_list = '\n'.join(
-                    '  {} {}{}{}'.format(
+
+                # 标注基表中已被加工过的字段
+                is_source_table = tbl in source_tables_from_processed
+                col_lines = []
+                for c in cols:
+                    field_key = f'{tbl}.{c["Field"]}'
+                    already_processed = is_source_table and field_key in processed_field_set
+                    line = '  {} {}{}{}{}'.format(
                         c["Field"], c["Type"],
                         "  PRIMARY KEY" if c.get("Key") == "PRI" else "",
                         " -- " + c["Comment"] if c.get("Comment") else "",
+                        "  【已加工到业务表，无需再从基表取】" if already_processed else "",
                     )
-                    for c in cols
-                )
-                schema_info += f'\n表 {tbl}:\n{col_list}\n'
+                    col_lines.append(line)
+
+                table_label = ''
+                if tbl in processed_table_names:
+                    table_label = '（已加工业务表 ✓）'
+                elif tbl in source_tables_from_processed:
+                    table_label = '（基表）'
+
+                schema_info += f'\n表 {tbl}{table_label}:\n' + '\n'.join(col_lines) + '\n'
 
     # 构建指标定义上下文
     if isinstance(metric_defs, list) and len(metric_defs) > 0:
@@ -124,15 +178,18 @@ async def metric_generate(request_body: dict):
 
 **已定义的指标**：
 {metric_defs_context}
+{processed_info}
 
 **用户的监控数据需求**：
 - 名称：{metric_name}
 - 描述：{description}
 
 你需要：
-1. 根据用户描述，理解他想要的维度和筛选条件
-2. 结合已定义的指标（聚合方式 + 度量字段），生成带维度的查询 SQL
-3. 推荐最佳的可视化类型
+1. **优先使用已存在的指标**：如果已定义的指标中有可以直接用于计算的，优先基于这些指标的定义（聚合方式 + 度量字段）来生成 SQL，不要重复造轮子
+2. **优先使用已加工的业务表**：如果已加工业务表中有需要的字段，直接从业务表取数，不要回到基表
+3. **同时参考业务表和基表**：如果业务表不能满足需求，再看基表中**尚未被加工过的字段**（标注了「已加工到业务表」的字段不需要再从基表取）
+4. **加工建议**：如果发现需要用到基表中未加工的字段，在 explanation 中给出建议，提示用户是否需要先通过 ETL 加工把这些字段加工到业务表中，以便后续复用
+5. 推荐最佳的可视化类型
 
 **SQL 语法要求（必须严格遵守）**：
 - 兼容 MySQL 5.7+ 语法
@@ -150,7 +207,7 @@ async def metric_generate(request_body: dict):
 - table: 结果是多列明细或复杂结构
 
 只返回 JSON，不要 markdown 代码块：
-{{"sql":"SELECT ...","chartType":"number|bar|line|pie|table","explanation":"简要说明查询逻辑","derivedMetricDef":{{"name":"...","definition":"...","tables":[...],"aggregation":"...","measureField":"..."}}}}
+{{"sql":"SELECT ...","chartType":"number|bar|line|pie|table","explanation":"简要说明查询逻辑。如果用到了基表中未加工的字段，请在此说明并建议用户是否需要先加工到业务表","usedBaseTables":true|false,"etlSuggestion":"如果 usedBaseTables 为 true，给出具体的加工建议（如：建议先将基表 xxx 的 yyy 字段加工到业务表 zzz 中）；否则为 null","derivedMetricDef":{{"name":"...","definition":"...","tables":[...],"aggregation":"...","measureField":"..."}}}}
 
 **派生指标建议（非常重要，必须认真分析）**：
 你必须分析用户的监控数据是否涉及一个**新的度量概念**，如果是，则**必须**在 derivedMetricDef 中返回派生指标定义。
@@ -337,10 +394,36 @@ async def metric_generate(request_body: dict):
                     }
 
         valid_chart_types = ['number', 'bar', 'line', 'pie', 'table']
+        etl_suggestion = None
+        if isinstance(last_derived_metric_def, dict):
+            # 模型可能在 derivedMetricDef 旁边返回了 etlSuggestion
+            pass
+
+        # 从最后一次 LLM 返回中提取 etlSuggestion
+        # 重新解析最后一次成功的 JSON
+        if chat_messages:
+            for msg in reversed(chat_messages):
+                if msg.get('role') == 'assistant' and msg.get('content'):
+                    jm = re.search(r'\{[\s\S]*\}', msg['content'])
+                    if jm:
+                        try:
+                            p = json.loads(jm.group(0))
+                            if p.get('etlSuggestion'):
+                                etl_suggestion = p['etlSuggestion']
+                            if p.get('usedBaseTables') and not etl_suggestion:
+                                etl_suggestion = p.get('explanation', '')
+                        except Exception:
+                            pass
+                        break
+
+        explanation_text = last_explanation
+        if etl_suggestion:
+            explanation_text += f'\n\n💡 加工建议：{etl_suggestion}'
+
         return {
             "sql": last_sql,
             "chartType": last_chart_type if last_chart_type in valid_chart_types else 'table',
-            "explanation": last_explanation + (f'\n\n\u26a0\ufe0f SQL 验证失败（已尝试 {MAX_RETRIES} 次自动修正）：{last_error}' if last_error else ''),
+            "explanation": explanation_text + (f'\n\n⚠️ SQL 验证失败（已尝试 {MAX_RETRIES} 次自动修正）：{last_error}' if last_error else ''),
             "derivedMetricDef": derived_metric_def,
         }
     except Exception as e:
