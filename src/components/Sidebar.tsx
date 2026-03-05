@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Plus, LayoutDashboard, Trash2, BarChart3, ChevronRight, ChevronDown, Pencil } from 'lucide-react';
 import { useDashboardStore } from '../dashboardStore';
 import { useMetricDefStore } from '../metricDefStore';
@@ -14,6 +14,13 @@ export default function Sidebar({ onViewMetric }: { onViewMetric?: (def: MetricD
 
   const allMetricDefs = useMetricDefStore(s => s.defs);
   const removeMetricDef = useMetricDefStore(s => s.remove);
+
+  // Ensure metric defs are loaded for all dashboards shown in sidebar
+  useEffect(() => {
+    dashboards.forEach(d => {
+      useMetricDefStore.getState().loadForDashboard(d.id);
+    });
+  }, [dashboards]);
 
   const [showInput, setShowInput] = useState(false);
   const [newName, setNewName] = useState('');

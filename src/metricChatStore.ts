@@ -4,6 +4,7 @@ import { useMetricDefStore } from './metricDefStore';
 import { useDashboardStore } from './dashboardStore';
 import { useSchemaStore } from './schemaStore';
 import { useProcessedTableStore } from './processedTableStore';
+import { metricChatApi } from './storeApi';
 
 let msgId = 0;
 const nextId = () => `mc-${++msgId}`;
@@ -13,22 +14,6 @@ function sysMsg(text: string): ChatMessage {
 }
 function userMsg(text: string): ChatMessage {
   return { id: nextId(), role: 'user', contents: [{ type: 'text', text }], timestamp: Date.now() };
-}
-
-const STORAGE_PREFIX = 'etl-metric-chat-';
-
-function persistMessages(dashboardId: string, messages: ChatMessage[]) {
-  try {
-    localStorage.setItem(STORAGE_PREFIX + dashboardId, JSON.stringify(messages));
-  } catch { /* ignore */ }
-}
-
-function loadMessages(dashboardId: string): ChatMessage[] | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + dashboardId);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch { return null; }
 }
 
 interface MetricChatState {
@@ -61,6 +46,10 @@ function getIntro(): ChatMessage {
   return { id: 'mc-intro', role: 'system', contents: [{ type: 'text', text: INTRO_TEXT }], timestamp: Date.now() };
 }
 
+function persistMessages(dashboardId: string, messages: ChatMessage[]) {
+  metricChatApi.save(dashboardId, messages).catch(() => {});
+}
+
 export const useMetricChatStore = create<MetricChatState>((set, get) => ({
   dashboardId: null,
   messages: [getIntro()],
@@ -69,19 +58,22 @@ export const useMetricChatStore = create<MetricChatState>((set, get) => ({
 
   loadForDashboard: (dashboardId: string) => {
     msgId = 0;
-    const saved = loadMessages(dashboardId);
-    if (saved && saved.length > 0) {
-      // restore msgId
-      let maxId = 0;
-      for (const m of saved) {
-        const n = parseInt(m.id.replace(/\D/g, ''), 10);
-        if (n > maxId) maxId = n;
-      }
-      msgId = maxId;
-      set({ dashboardId, messages: saved, isProcessing: false });
-    } else {
-      set({ dashboardId, messages: [getIntro()], isProcessing: false });
-    }
+    set({ dashboardId, messages: [getIntro()], isProcessing: false });
+
+    (async () => {
+      try {
+        const saved = await metricChatApi.get(dashboardId);
+        if (saved && saved.length > 0) {
+          let maxId = 0;
+          for (const m of saved) {
+            const n = parseInt(m.id.replace(/\D/g, ''), 10);
+            if (n > maxId) maxId = n;
+          }
+          msgId = maxId;
+          set({ messages: saved });
+        }
+      } catch { /* first load */ }
+    })();
   },
 
   setConnectionString: (cs) => set({ connectionString: cs }),
@@ -149,6 +141,45 @@ export const useMetricChatStore = create<MetricChatState>((set, get) => ({
             });
           }
         }
+
+        // 如果返回了 processedTable，保存到 store
+        if (data.processedTable) {
+          const dbId = get().dashboardId || useDashboardStore.getState().activeDashboardId;
+          if (dbId) {
+            const pt = data.processedTable;
+            const chatHistory = get().messages
+              .filter(m => m.id !== 'mc-intro')
+              .map(m => ({
+                role: m.role === 'user' ? 'user' : 'assistant',
+                content: m.contents
+                  .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+                  .map(c => c.text).join('\n').trim(),
+              }))
+              .filter(m => m.content);
+
+            useProcessedTableStore.getState().addOrUpdate({
+              dashboardId: dbId,
+              database: pt.database,
+              table: pt.table,
+              sourceTables: pt.sourceTables || [],
+              fieldMappings: pt.fieldMappings || [],
+              insertSql: pt.insertSql || '',
+              chatHistory,
+              processedAt: Date.now(),
+            });
+
+            const connStr = get().connectionString;
+            if (connStr) {
+              const schema = useSchemaStore.getState();
+              await schema.fetchTree(connStr);
+              const tableKey = `${pt.database}.${pt.table}`;
+              if (!schema.selectedTables.has(tableKey)) {
+                schema.toggleTable(pt.database, pt.table);
+              }
+              schema.expandDb(pt.database);
+            }
+          }
+        }
       } catch (err) {
         const errText = err instanceof Error ? err.message : '请求失败';
         const updatedMessages = [...get().messages, sysMsg(`请求失败：${errText}`)];
@@ -163,6 +194,6 @@ export const useMetricChatStore = create<MetricChatState>((set, get) => ({
     msgId = 0;
     const fresh = [getIntro()];
     set({ messages: fresh, isProcessing: false });
-    if (dashboardId) persistMessages(dashboardId, fresh);
+    if (dashboardId) metricChatApi.clear(dashboardId).catch(() => {});
   },
 }));

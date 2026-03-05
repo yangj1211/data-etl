@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { LayoutDashboard, Plus, Table2, Clock } from 'lucide-react';
 import { useDashboardStore } from '../dashboardStore';
 import { useMetricStore } from '../metricStore';
@@ -25,6 +25,14 @@ export default function DashboardContent() {
   const processedTables = allProcessedTables.filter(t => t.dashboardId === activeDashboardId);
 
   const metrics = allMetrics.filter(m => m.dashboardId === activeDashboardId);
+
+  // Ensure data is loaded for the active dashboard (covers case when AgentPanel is collapsed)
+  useEffect(() => {
+    if (activeDashboardId) {
+      useProcessedTableStore.getState().loadForDashboard(activeDashboardId);
+      useMetricStore.getState().loadForDashboard(activeDashboardId);
+    }
+  }, [activeDashboardId]);
 
   const [showAdd, setShowAdd] = useState(false);
   const [lineageTable, setLineageTable] = useState<ProcessedTable | null>(null);

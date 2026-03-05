@@ -4,7 +4,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import PORT
-from routers import chat, metric_chat, mapping, dml, tables, metric, lineage, debug
+from routers import chat, metric_chat, mapping, dml, tables, metric, lineage, debug, storage
+from db.store import init_db
 
 # 配置 etl.* 日志：同时输出到终端和文件
 _log_fmt = logging.Formatter("%(asctime)s %(name)s %(message)s", datefmt="%H:%M:%S")
@@ -22,6 +23,9 @@ _etl_logger.addHandler(_fh)
 
 def create_app() -> FastAPI:
     app = FastAPI()
+
+    # Initialize SQLite database
+    init_db()
 
     # CORS middleware
     app.add_middleware(
@@ -55,6 +59,7 @@ def create_app() -> FastAPI:
     app.include_router(metric.router)
     app.include_router(lineage.router)
     app.include_router(debug.router)
+    app.include_router(storage.router)
 
     @app.get("/")
     async def root():

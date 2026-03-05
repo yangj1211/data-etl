@@ -7,3 +7,6 @@ dist
 __pycache__/
 .venv/
 *.pyc
+*.db
+*.db-shm
+*.db-wal

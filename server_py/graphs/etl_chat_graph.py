@@ -155,7 +155,7 @@ async def tool_calling_loop_node(state: dict) -> dict:
 
     render_blocks = {}
     block_counter = [1]  # 可变计数器
-    write_ops: list[dict] = []  # 记录成功的写操作（INSERT）
+    write_ops = []  # type: list  # 记录成功的写操作（INSERT）
 
     # ── 构建 system prompt ──
     selected_tables_note = ""
@@ -299,7 +299,11 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
 1. 用中文回复，简洁友好。**因无「下一步」按钮，你必须在对话中提示用户下一步该干啥**：根据当前步骤和对话理解，在回复中自然说明「接下来可以输入/做什么」（不写死话术，灵活提醒）。
 2. **你执行的每一个 SQL 都必须在回复中给出返回结果**：SELECT 须有表格 + 返回行数；INSERT 等须明确写出**SQL 返回码**。**禁止**只写「正在执行」而不写执行结果。用 {{{{TABLE_N}}}} 引用工具返回的数据块。
 3. 若工具执行失败，必须**如实输出失败原因**，并给出**自我纠正**建议。
-4. 若本轮**没有调用过工具**，**不得声称**已执行任何数据库操作。**绝对禁止**回复「正在查看...请稍候」「让我查一下...」等中间状态文本——要么直接调用工具，要么直接基于已有信息回复。
+4. **【最高优先级规则 — 禁止空谈】** 用户的每一条消息都是一个指令，你必须对每个指令做出实质性响应。绝对禁止只回复过渡性文本而不执行任何操作。具体要求：
+   - 如果用户要求查看/验证/检查/分析数据 → 你必须在本轮直接调用 execute_sql 工具执行相应 SQL，并在回复中展示结果。不允许只说「让我验证一下」「现在来检查」然后就结束。
+   - 如果用户要求执行某个操作 → 你必须在本轮完成该操作（调用工具或展示 SQL 等待确认），不允许只描述你打算做什么。
+   - 如果你的回复以冒号「：」结尾、或包含「让我」「现在来」「接下来」等词但没有实际内容跟随 → 这说明你没有完成用户的指令，这是严重错误。
+   - 简单来说：**每轮回复必须包含实质性内容（工具调用结果、完整 SQL 方案、或基于已有信息的完整分析），绝不允许只有过渡性文字。**
 5. 若用户发送了 MySQL 连接串，设置 "connectionReceived": true。
 6. **所有会修改库表或数据的操作（DDL、DML）**：建库、建表、INSERT INTO ... SELECT 等，都必须**先展示 SQL 并提示用户确认**，只有用户明确回复「确认」「执行」「可以」后才调用工具真实执行。不得在用户未确认时执行任何写操作。
 
@@ -317,7 +321,11 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
     # 只有在有连接串时才提供工具
     tools = SQL_TOOLS if connection_string else None
 
-    MAX_TOOL_ROUNDS = 5
+    MAX_TOOL_ROUNDS = 8
+    total_tool_calls_made = 0  # 整个循环中实际调用工具的总次数
+    reuse_nudge_count = 0  # 复用模式下强制催促的次数
+    MAX_REUSE_NUDGES = 3  # 最多催促几次
+
     try:
         for round_i in range(MAX_TOOL_ROUNDS):
             result = await call_llm(
@@ -338,6 +346,28 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
 
             # 最终回复（无 tool calls）
             if not tool_calls:
+                # 复用模式下，如果模型从未调用过工具就想停，强制催它继续
+                if (reuse_context and total_tool_calls_made == 0
+                        and tools and reuse_nudge_count < MAX_REUSE_NUDGES):
+                    reuse_nudge_count += 1
+                    logger.warning(
+                        "[ETL][Reuse] 模型未调用工具就停止了 (nudge %d/%d)，强制继续",
+                        reuse_nudge_count, MAX_REUSE_NUDGES,
+                    )
+                    # 把模型的空谈回复加入上下文，再追加强制指令
+                    content = result.get("content", "")
+                    if content:
+                        messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "你还没有调用任何工具。请立即调用 execute_sql 工具执行 DESCRIBE 查看当前选中库表的表结构，"
+                            "然后基于参考加工逻辑生成完整的加工方案（CREATE TABLE + INSERT INTO ... SELECT）。"
+                            "不要再解释你打算做什么，直接调用工具。"
+                        ),
+                    })
+                    continue
+
                 return _process_final_response(
                     result.get("content", ""),
                     render_blocks, current_step_hint, connection_test_ok,
@@ -371,6 +401,7 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
                 return tc.id, res
 
             results = await asyncio.gather(*[_run_tool(tc) for tc in tool_calls])
+            total_tool_calls_made += len(results)
             for tc_id, tool_result in results:
                 messages.append({
                     "role": "tool",
@@ -378,7 +409,31 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
                     "content": tool_result,
                 })
 
-        # 超过最大轮次，强制不带 tools 再调一次
+        # 超过最大轮次，再执行最后一个 tool call 然后强制总结
+        if result.get("ok") and result.get("tool_calls"):
+            last_tool_calls = result["tool_calls"]
+            messages.append({
+                "role": "assistant",
+                "content": result.get("content"),
+                "tool_calls": [
+                    {"id": tc.id, "type": "function",
+                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                    for tc in last_tool_calls
+                ],
+            })
+            async def _run_tool_final(tc):
+                res = await execute_tool_call(
+                    tc, connection_string, render_blocks, block_counter, write_ops,
+                )
+                return tc.id, res
+            final_results = await asyncio.gather(*[_run_tool_final(tc) for tc in last_tool_calls])
+            for tc_id, tool_result in final_results:
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": tool_result})
+
+        messages.append({
+            "role": "user",
+            "content": "请基于以上所有工具执行结果，直接给出最终回复。不要再调用工具。",
+        })
         result = await call_llm(
             messages, temperature=0.3, max_tokens=4096,
             caller="etl_chat_final",
@@ -457,17 +512,50 @@ def _process_final_response(content, render_blocks, current_step_hint, connectio
         }
     }
 
-    # 如果有成功的 INSERT 操作，返回结构化的加工表信息
+    # 如果有成功的写操作，返回结构化的加工表信息
     if write_ops:
-        # 取最后一个 INSERT 操作（通常一轮只有一个）
-        last_op = write_ops[-1]
-        response["llm_response"]["processedTable"] = {
-            "database": last_op["database"],
-            "table": last_op["table"],
-            "insertSql": last_op["insertSql"],
-            "sourceTables": last_op["sourceTables"],
-            "fieldMappings": last_op.get("fieldMappings", []),
-        }
+        insert_ops = [op for op in write_ops if op.get("type") == "insert"]
+        update_ops = [op for op in write_ops if op.get("type") == "update"]
+        alter_ops = [op for op in write_ops if op.get("type") == "alter"]
+        # 兼容旧格式（无 type 字段的视为 insert）
+        legacy_ops = [op for op in write_ops if "type" not in op]
+        insert_ops.extend(legacy_ops)
+
+        if insert_ops:
+            last_op = insert_ops[-1]
+            response["llm_response"]["processedTable"] = {
+                "database": last_op["database"],
+                "table": last_op["table"],
+                "insertSql": last_op.get("insertSql", last_op.get("sql", "")),
+                "sourceTables": last_op.get("sourceTables", []),
+                "fieldMappings": last_op.get("fieldMappings", []),
+            }
+
+        # UPDATE/ALTER 操作：返回增量字段映射，前端合并到已有 processedTable
+        incremental_mappings = []
+        for op in update_ops:
+            incremental_mappings.extend(op.get("fieldMappings", []))
+        for op in alter_ops:
+            # ALTER 只记录新增列名，不含映射（映射由后续 UPDATE 提供）
+            pass
+
+        if incremental_mappings:
+            # 如果同时有 INSERT，增量映射追加到 processedTable
+            if "processedTable" in response["llm_response"]:
+                existing = response["llm_response"]["processedTable"].get("fieldMappings", [])
+                response["llm_response"]["processedTable"]["fieldMappings"] = existing + incremental_mappings
+            else:
+                # 只有 UPDATE 没有 INSERT — 返回增量更新信息
+                # 取第一个 UPDATE 的目标表信息
+                first_update = update_ops[0]
+                response["llm_response"]["processedTable"] = {
+                    "database": first_update["database"],
+                    "table": first_update["table"],
+                    "insertSql": "",  # 无新的 INSERT SQL
+                    "sourceTables": first_update.get("sourceTables", []),
+                    "fieldMappings": incremental_mappings,
+                    "_incremental": True,  # 标记为增量更新
+                }
 
     return response
 

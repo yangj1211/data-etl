@@ -13,7 +13,7 @@ logger = logging.getLogger("etl.metric_graph")
 from db.connection import get_connection_config
 from db.operations import run_database_operation, safe_identifier
 from llm.client import call_llm
-from llm.tools import SQL_TOOLS, execute_tool_call
+from llm.tools import SQL_TOOLS, METRIC_CHAT_TOOLS, execute_tool_call, execute_create_metric_def
 from utils.formatters import rows_to_markdown_table
 
 
@@ -123,13 +123,7 @@ async def tool_calling_loop_node(state: MetricChatState) -> dict:
 
     render_blocks = {}
     block_counter = [1]
-
-    # 提取用户最后一条消息，用于后续确认校验
-    last_user_msg = ''
-    for msg in reversed(conversation):
-        if msg.get('role') == 'user':
-            last_user_msg = (msg.get('content') or '').strip()
-            break
+    write_ops = []  # type: list  # 记录成功的写操作（INSERT/UPDATE/ALTER）
 
     selected_tables_restriction = ''
     if len(selected) > 0:
@@ -267,7 +261,11 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
 
 **回复规则**：
 - 用中文回复，简洁友好
-- **绝对禁止**回复「正在查看...请稍候」「让我查一下...」等中间状态的文本。如果需要查数据库，直接调用 execute_sql 工具，不要先回复再调用
+- **【最高优先级规则 — 禁止空谈】** 用户的每一条消息都是一个指令，你必须对每个指令做出实质性响应。绝对禁止只回复过渡性文本而不执行任何操作。具体要求：
+  - 如果用户要求查看/验证/检查/分析数据 → 你必须在本轮直接调用 execute_sql 工具执行相应 SQL，并在回复中展示结果。不允许只说「让我验证一下」「现在来检查」然后就结束。
+  - 如果用户要求执行某个操作 → 你必须在本轮完成该操作（调用工具或展示 SQL 等待确认），不允许只描述你打算做什么。
+  - 如果你的回复以冒号「：」结尾、或包含「让我」「现在来」「接下来」等词但没有实际内容跟随 → 这说明你没有完成用户的指令，这是严重错误。
+  - **每轮回复必须包含实质性内容（工具调用结果、完整 SQL 方案、或基于已有信息的完整分析），绝不允许只有过渡性文字。**
 - 若工具执行失败，必须如实输出失败原因，不得声称成功
 - 若工具执行成功，必须以 markdown 表格展示数据。用 {{{{TABLE_N}}}} 引用数据块
 - **【最重要的规则】所有写操作（CREATE TABLE、ALTER TABLE、INSERT、DELETE、DROP 等）必须先展示完整 SQL + 业务含义解释，然后提示用户确认，等用户回复「确认」「执行」后才能调用工具执行。绝对不能跳过确认直接执行！**
@@ -275,30 +273,24 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
 - 表格内容必须与工具返回结果完全一致，不得编造
 - 如果你已经有足够的信息（如 schema_context 中已有表结构），直接基于已有信息回复，不需要再调用工具查询
 
-**输出格式**：只返回一个 JSON 对象，不要 markdown 代码块：
+**输出格式**：直接用 markdown 回复，不要包裹在 JSON 中。
 
-当还在讨论或执行数据库操作时：
-{{"reply":"你的回复（可含 markdown，用 {{{{TABLE_N}}}} 引用数据块）"}}
-
-当用户确认指标后（用户最后一条消息必须包含明确的确认词，如：确认、可以、没问题、好的、创建、是的、对、OK）：
-{{"reply":"指标已创建：xxx","metricDef":{{"name":"指标名称","definition":"指标计算逻辑描述","tables":["db.table1"],"aggregation":"SUM","measureField":"amount"}}}}
-
-**aggregation 可选值**：SUM、COUNT、AVG、COUNT_DISTINCT、MAX、MIN
-**measureField**：被聚合的字段名
-**重要**：
-- 只有用户最后一条消息包含明确的确认词（确认/可以/没问题/好的/创建/是的/对/OK）时才返回 metricDef
-- 用户只是重复指标名称、描述需求、提问等，都**不算确认**，不要返回 metricDef
-- 讨论阶段、提出建议阶段、等待确认阶段，都不要返回 metricDef
-- 如果不确定用户是否在确认，就不要返回 metricDef，而是再问一次"""
+**【创建指标的唯一方式】**：
+当用户确认要创建指标时，你**必须调用 `create_metric_def` 工具**来创建指标。
+- 只有调用 `create_metric_def` 工具才能真正创建指标
+- 仅在回复文本中说"指标已创建"是无效的，指标不会被保存
+- 用户确认后（说了"确认"、"可以"、"好的"、"创建"等），立即调用 `create_metric_def` 工具
+- 工具调用成功后，再在回复中告知用户指标已创建"""
 
     messages = [
         {'role': 'system', 'content': system_prompt},
         *[{'role': t['role'], 'content': t['content']} for t in conversation],
     ]
 
-    tools = SQL_TOOLS if connection_string else None
+    tools = METRIC_CHAT_TOOLS if connection_string else None
+    created_metric_defs = []  # 通过 create_metric_def 工具真正创建的指标
 
-    MAX_TOOL_ROUNDS = 5
+    MAX_TOOL_ROUNDS = 8
     try:
         for round_i in range(MAX_TOOL_ROUNDS):
             result = await call_llm(
@@ -319,7 +311,8 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
 
             if not tool_calls:
                 return _process_metric_response(
-                    result.get('content', ''), render_blocks, last_user_msg,
+                    result.get('content', ''), render_blocks,
+                    write_ops, created_metric_defs, conversation,
                 )
 
             messages.append({
@@ -341,9 +334,12 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
             # 并行执行所有 tool calls
             async def _run_tool(tc):
                 logger.info("[Tool] call: %s args=%s", tc.function.name, tc.function.arguments[:200])
-                res = await execute_tool_call(
-                    tc, connection_string, render_blocks, block_counter,
-                )
+                if tc.function.name == 'create_metric_def':
+                    res = await execute_create_metric_def(tc, created_metric_defs)
+                else:
+                    res = await execute_tool_call(
+                        tc, connection_string, render_blocks, block_counter, write_ops,
+                    )
                 logger.info("[Tool] result: %s", res[:200])
                 return tc.id, res
 
@@ -355,13 +351,41 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
                     'content': tool_result,
                 })
 
-        # 超过最大轮次
+        # 超过最大轮次，再执行最后一个 tool call 然后强制总结
+        if result.get('ok') and result.get('tool_calls'):
+            last_tool_calls = result['tool_calls']
+            messages.append({
+                'role': 'assistant',
+                'content': result.get('content'),
+                'tool_calls': [
+                    {'id': tc.id, 'type': 'function',
+                     'function': {'name': tc.function.name, 'arguments': tc.function.arguments}}
+                    for tc in last_tool_calls
+                ],
+            })
+            async def _run_tool_final(tc):
+                if tc.function.name == 'create_metric_def':
+                    res = await execute_create_metric_def(tc, created_metric_defs)
+                else:
+                    res = await execute_tool_call(
+                        tc, connection_string, render_blocks, block_counter, write_ops,
+                    )
+                return tc.id, res
+            final_results = await asyncio.gather(*[_run_tool_final(tc) for tc in last_tool_calls])
+            for tc_id, tool_result in final_results:
+                messages.append({'role': 'tool', 'tool_call_id': tc_id, 'content': tool_result})
+
+        # 最终总结（不带 tools，强制模型输出文本）
+        messages.append({
+            'role': 'user',
+            'content': '请基于以上所有工具执行结果，直接给出最终回复。不要再调用工具。',
+        })
         result = await call_llm(
             messages, temperature=0.3, max_tokens=4096,
             caller="metric_chat_final",
         )
         content = result.get('content', '') if result.get('ok') else '对话处理超时，请重试。'
-        return _process_metric_response(content, render_blocks, last_user_msg)
+        return _process_metric_response(content, render_blocks, write_ops, created_metric_defs, conversation)
 
     except Exception as e:
         logger.error("[Metric] tool_calling_loop error: %s", e)
@@ -373,9 +397,104 @@ execute_sql 工具返回的结果中会包含数据块 ID（如 TABLE_1、SQL_1�
         }
 
 
-def _process_metric_response(content, render_blocks, last_user_msg=''):
-    """处理 LLM 最终回复：解析 JSON、替换占位符。对 metricDef 做确认词校验。"""
+def _try_extract_confirmed_metric(conversation):
+    """确定性兜底：如果用户最后一条消息是确认词，且对话历史中有指标定义方案，则提取。
+    不依赖模型回复格式，纯规则匹配。"""
+    if not conversation or len(conversation) < 2:
+        return None
+
+    # 1. 检查用户最后一条消息是否是确认
+    last_user_msg = ''
+    for msg in reversed(conversation):
+        if msg.get('role') == 'user':
+            last_user_msg = (msg.get('content') or '').strip()
+            break
+
+    if not last_user_msg:
+        return None
+
+    confirm_pattern = re.compile(
+        r'^(确认|可以|没问题|好的|创建|是的|对|行|同意|确定|好|嗯|ok|yes|y|'
+        r'没问题的|可以的|好的好的|是|对的|创建吧|确认创建|就这样|就这个|方案[一二三123])',
+        re.IGNORECASE,
+    )
+    if len(last_user_msg) > 20 or not confirm_pattern.search(last_user_msg):
+        return None
+
+    # 2. 从对话历史中倒序找包含指标定义方案的 assistant 消息
+    for msg in reversed(conversation):
+        if msg.get('role') not in ('assistant',):
+            continue
+        text = msg.get('content') or ''
+        if not text:
+            continue
+
+        # 必须包含"指标名称"关键词
+        name_match = (
+            re.search(r'\*\*指标名称\*\*[：:]\s*(.+)', text)
+            or re.search(r'指标名称[：:]\s*(.+)', text)
+        )
+        if not name_match:
+            continue
+
+        metric_name = name_match.group(1).strip().rstrip('*').strip()
+
+        # 提取计算逻辑
+        definition = ''
+        for pat in [r'\*\*计算逻辑\*\*[：:]\s*(.+)', r'计算逻辑[：:]\s*(.+)',
+                    r'\*\*计算方式\*\*[：:]\s*(.+)', r'计算方式[：:]\s*(.+)']:
+            m = re.search(pat, text)
+            if m:
+                definition = m.group(1).strip().rstrip('*').strip()
+                break
+
+        # 提取聚合方式
+        aggregation = 'SUM'
+        for pat in [r'\*\*聚合方式\*\*[：:]\s*(.+)', r'聚合方式[：:]\s*(.+)']:
+            m = re.search(pat, text)
+            if m:
+                agg_text = m.group(1).strip().upper()
+                for kw in ['COUNT_DISTINCT', 'SUM', 'COUNT', 'AVG', 'MAX', 'MIN']:
+                    if kw in agg_text:
+                        aggregation = kw
+                        break
+                break
+
+        # 提取度量字段
+        measure_field = ''
+        for pat in [r'\*\*度量字段\*\*[：:]\s*(.+)', r'度量字段[：:]\s*(.+)']:
+            m = re.search(pat, text)
+            if m:
+                measure_field = m.group(1).strip().rstrip('*').strip()
+                break
+
+        # 提取涉及表
+        tables = []
+        for pat in [r'\*\*涉及表\*\*[：:]\s*(.+)', r'涉及表[：:]\s*(.+)']:
+            m = re.search(pat, text)
+            if m:
+                tbl_text = m.group(1).strip()
+                tables = [t.strip().rstrip('*').strip() for t in re.split(r'[,，、\s]+', tbl_text) if '.' in t]
+                break
+
+        if metric_name:
+            logger.info("[Metric] deterministic extraction: name=%s, agg=%s, measure=%s, tables=%s",
+                        metric_name, aggregation, measure_field, tables)
+            return {
+                'name': metric_name,
+                'definition': definition,
+                'tables': tables,
+                'aggregation': aggregation,
+                'measureField': measure_field,
+            }
+
+    return None
+
+
+def _process_metric_response(content, render_blocks, write_ops=None, created_metric_defs=None, conversation=None):
+    """处理 LLM 最终回复：解析 JSON、替换占位符。metricDef 优先由工具调用决定，兜底从对话历史确定性提取。"""
     content = (content or '').strip()
+    # 尝试从 JSON 格式回复中提取 reply 文本
     json_match = re.search(r'\{[\s\S]*\}', content)
     out = {'reply': content}
     if json_match:
@@ -383,36 +502,19 @@ def _process_metric_response(content, render_blocks, last_user_msg=''):
             parsed = json.loads(json_match.group(0))
             if isinstance(parsed.get('reply'), str):
                 out['reply'] = parsed['reply']
-            if parsed.get('metricDef'):
-                # 校验用户最后一条消息是否包含确认词
-                # 严格模式：消息必须短（≤15字）且包含确认词，或者整条消息就是确认词
-                confirm_words = [
-                    '确认', '可以', '没问题', '好的', '创建', '是的',
-                    '对', '行', '同意', '确定', '好', '嗯',
-                    '没问题的', '可以的', '好的好的', '是', '对的',
-                    '创建吧', '确认创建', '就这样', '就这个',
-                ]
-                is_confirmed = False
-                if last_user_msg:
-                    msg_clean = last_user_msg.strip().lower()
-                    # 方式1：整条消息就是确认词
-                    if msg_clean in [w.lower() for w in confirm_words] or msg_clean in ['ok', 'yes', 'y']:
-                        is_confirmed = True
-                    # 方式2：短消息（≤15字）中包含确认词
-                    elif len(msg_clean) <= 15:
-                        confirm_pattern = re.compile(
-                            r'确认|可以|没问题|好的|创建|是的|同意|确定',
-                            re.IGNORECASE,
-                        )
-                        is_confirmed = bool(confirm_pattern.search(msg_clean))
-                    # 长消息不视为确认（用户在描述需求，不是在确认）
-
-                if is_confirmed:
-                    out['metricDef'] = parsed['metricDef']
-                else:
-                    logger.info("[Metric] LLM returned metricDef but user msg '%s' lacks confirmation, stripping metricDef", last_user_msg[:50])
         except (json.JSONDecodeError, ValueError):
             pass
+
+    # 优先：工具调用创建的指标
+    if created_metric_defs and len(created_metric_defs) > 0:
+        out['metricDef'] = created_metric_defs[-1]
+        logger.info("[Metric] metricDef created via tool: %s", out['metricDef'].get('name', ''))
+    else:
+        # 兜底：确定性检查 — 用户确认了 + 对话中有指标方案 → 自动提取
+        extracted = _try_extract_confirmed_metric(conversation)
+        if extracted:
+            out['metricDef'] = extracted
+            logger.info("[Metric] metricDef extracted deterministically: %s", extracted.get('name', ''))
 
     # 替换标准格式的占位符
     if render_blocks:
@@ -422,15 +524,13 @@ def _process_metric_response(content, render_blocks, last_user_msg=''):
             reply = reply.replace('{' + bid + '}', content_val)
         out['reply'] = reply
 
-    # 智能处理畸形占位符（如 {BLOCK_ID: TABLE_3}、{BLOCK_ID:SQL_1} 等）
-    # 先尝试提取真正的 block ID 并替换为实际内容，找不到才清理掉
+    # 智能处理畸形占位符
     def _replace_malformed(match):
         text = match.group(0)
-        # 从中提取 TABLE_N 或 SQL_N
         inner = re.search(r'(TABLE_\d+|SQL_\d+)', text)
         if inner and render_blocks and inner.group(1) in render_blocks:
             return render_blocks[inner.group(1)]
-        return ''  # 找不到就清理掉
+        return ''
 
     out['reply'] = re.sub(
         r'\{+\s*(?:BLOCK_ID\s*[:\s]*)?(?:TABLE_\d+|SQL_\d+|BLOCK_\d+|BLOCK_ID)\s*\}+',
@@ -442,7 +542,45 @@ def _process_metric_response(content, render_blocks, last_user_msg=''):
                 len(out['reply']), 'metricDef' in out,
                 list(render_blocks.keys()) if render_blocks else [])
 
-    return {'llm_response': out}
+    response = {'llm_response': out}
+
+    # 处理写操作（INSERT/UPDATE/ALTER），返回 processedTable 信息
+    if write_ops:
+        insert_ops = [op for op in write_ops if op.get("type") == "insert"]
+        update_ops = [op for op in write_ops if op.get("type") == "update"]
+        legacy_ops = [op for op in write_ops if "type" not in op]
+        insert_ops.extend(legacy_ops)
+
+        if insert_ops:
+            last_op = insert_ops[-1]
+            out["processedTable"] = {
+                "database": last_op["database"],
+                "table": last_op["table"],
+                "insertSql": last_op.get("insertSql", last_op.get("sql", "")),
+                "sourceTables": last_op.get("sourceTables", []),
+                "fieldMappings": last_op.get("fieldMappings", []),
+            }
+
+        incremental_mappings = []
+        for op in update_ops:
+            incremental_mappings.extend(op.get("fieldMappings", []))
+
+        if incremental_mappings:
+            if "processedTable" in out:
+                existing = out["processedTable"].get("fieldMappings", [])
+                out["processedTable"]["fieldMappings"] = existing + incremental_mappings
+            else:
+                first_update = update_ops[0]
+                out["processedTable"] = {
+                    "database": first_update["database"],
+                    "table": first_update["table"],
+                    "insertSql": "",
+                    "sourceTables": first_update.get("sourceTables", []),
+                    "fieldMappings": incremental_mappings,
+                    "_incremental": True,
+                }
+
+    return response
 
 
 # ---------------------------------------------------------------------------

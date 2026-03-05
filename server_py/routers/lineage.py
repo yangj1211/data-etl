@@ -7,6 +7,9 @@ from utils.sql_parser import extract_table_refs_from_sql
 import re
 import json
 import hashlib
+import logging
+
+logger = logging.getLogger("etl.lineage")
 
 router = APIRouter()
 
@@ -407,15 +410,17 @@ def _build_metric_lineage_from_data(
     for pt in relevant_processed:
         pt_full = f'{pt["database"]}.{pt["table"]}'
         if pt_full in processed_table_names:
-            # 只列出与指标相关的字段
+            # 只列出与指标相关的原始字段（不是计算表达式）
             related_fields = []
             fm_list = pt.get('fieldMappings') or []
             for fm in fm_list:
                 tf = fm.get('targetField', '')
                 if tf in measure_fields or not measure_fields:
                     related_fields.append(tf)
-            # 如果 measure_fields 没匹配上，加入度量字段本身
-            if not related_fields and metric_measure_field:
+            # 如果 fieldMappings 没匹配上，用拆分后的度量字段
+            if not related_fields and measure_fields:
+                related_fields = sorted(measure_fields)
+            elif not related_fields and metric_measure_field:
                 related_fields = [metric_measure_field]
             processed_layer_tables.append({
                 'name': pt_full,
@@ -454,12 +459,20 @@ def _build_metric_lineage_from_data(
                 })
     # processed → metric
     for pt_tbl in processed_layer_tables:
-        for f in measure_fields or [metric_measure_field]:
+        # 如果度量字段是表达式（如 zxsgscbhj - zzzcbhj），用一条 edge 表示计算逻辑
+        if len(measure_fields) > 1 and metric_measure_field:
             edges.append({
-                'from': {'table': pt_tbl['name'], 'field': f},
+                'from': {'table': pt_tbl['name'], 'field': ', '.join(sorted(measure_fields))},
                 'to': {'table': metric_name, 'field': f'{metric_aggregation}({metric_measure_field})'},
                 'transform': f'{metric_aggregation} 聚合',
             })
+        else:
+            for f in measure_fields or [metric_measure_field]:
+                edges.append({
+                    'from': {'table': pt_tbl['name'], 'field': f},
+                    'to': {'table': metric_name, 'field': f'{metric_aggregation}({metric_measure_field})'},
+                    'transform': f'{metric_aggregation} 聚合',
+                })
     # 无 processed 时 source → metric
     if not processed_layer_tables:
         for st in source_tables:
@@ -600,6 +613,44 @@ async def lineage(request_body: dict):
     if not sql:
         return JSONResponse(status_code=400, content={"error": "Missing sql"})
 
+    # ── 补全 fieldMappings：对比数据库实际表结构，找出缺失的字段映射 ──
+    if connection_string and target_table and isinstance(field_mappings, list):
+        parts = target_table.split('.')
+        if len(parts) == 2:
+            desc_result = await run_database_operation(
+                connection_string, 'describeTable',
+                {'database': parts[0], 'table': parts[1]},
+            )
+            if desc_result.get('ok'):
+                actual_columns = [
+                    c['Field'] for c in (desc_result.get('data', {}).get('columns') or [])
+                ]
+                existing_target_fields = {fm.get('targetField', '') for fm in field_mappings}
+                missing_fields = [col for col in actual_columns if col not in existing_target_fields]
+                if missing_fields:
+                    logger.info("[Lineage] %s missing fields: %s", target_table, missing_fields)
+                    # 从 source tables 的表结构中匹配
+                    source_columns_map = {}
+                    for src in (source_tables or []):
+                        src_parts = src.split('.')
+                        if len(src_parts) != 2:
+                            continue
+                        src_desc = await run_database_operation(
+                            connection_string, 'describeTable',
+                            {'database': src_parts[0], 'table': src_parts[1]},
+                        )
+                        if src_desc.get('ok'):
+                            for c in (src_desc.get('data', {}).get('columns') or []):
+                                if c['Field'] not in source_columns_map:
+                                    source_columns_map[c['Field']] = src
+                    for field in missing_fields:
+                        field_mappings.append({
+                            'targetField': field,
+                            'sourceTable': source_columns_map.get(field, ''),
+                            'sourceExpr': field,
+                            'transform': '直接映射',
+                        })
+
     # ★ 有结构化数据时优先直接构建，结果不完整则回退 LLM
     if isinstance(field_mappings, list) and len(field_mappings) > 0:
         result = _build_lineage_from_structured_data(
@@ -726,6 +777,76 @@ async def metric_lineage(request_body: dict):
 
     if not metric_def:
         return JSONResponse(status_code=400, content={"error": "Missing metricDef"})
+
+    logger.info("[MetricLineage] metric=%s, measure=%s, tables=%s",
+                metric_def.get('name'), metric_def.get('measureField'), metric_def.get('tables'))
+    for pt in (processed_tables or []):
+        fm_count = len(pt.get('fieldMappings') or [])
+        fm_fields = [fm.get('targetField') for fm in (pt.get('fieldMappings') or [])]
+        logger.info("[MetricLineage] processedTable=%s.%s fieldMappings(%d)=%s sourceTables=%s insertSql_len=%d",
+                    pt.get('database'), pt.get('table'), fm_count, fm_fields,
+                    pt.get('sourceTables'), len(pt.get('insertSql') or ''))
+
+    # ── 补全 fieldMappings：对比数据库实际表结构，找出缺失的字段映射 ──
+    if connection_string and processed_tables:
+        for pt in processed_tables:
+            pt_db = pt.get('database', '')
+            pt_tbl = pt.get('table', '')
+            existing_fm = pt.get('fieldMappings') or []
+            existing_target_fields = {fm.get('targetField', '') for fm in existing_fm}
+
+            # 查询业务表的实际列
+            desc_result = await run_database_operation(
+                connection_string, 'describeTable',
+                {'database': pt_db, 'table': pt_tbl},
+            )
+            if not desc_result.get('ok'):
+                continue
+            actual_columns = [
+                c['Field'] for c in (desc_result.get('data', {}).get('columns') or [])
+            ]
+
+            # 找出 fieldMappings 中缺失的列
+            missing_fields = [
+                col for col in actual_columns
+                if col not in existing_target_fields
+            ]
+            if not missing_fields:
+                continue
+
+            logger.info("[MetricLineage] %s.%s missing fields in fieldMappings: %s",
+                        pt_db, pt_tbl, missing_fields)
+
+            # 尝试从 source tables 的表结构中匹配缺失字段的来源
+            source_columns_map = {}  # field_name -> source_table
+            for src in (pt.get('sourceTables') or []):
+                parts = src.split('.')
+                if len(parts) != 2:
+                    continue
+                src_desc = await run_database_operation(
+                    connection_string, 'describeTable',
+                    {'database': parts[0], 'table': parts[1]},
+                )
+                if src_desc.get('ok'):
+                    for c in (src_desc.get('data', {}).get('columns') or []):
+                        fname = c['Field']
+                        if fname not in source_columns_map:
+                            source_columns_map[fname] = src
+
+            # 为缺失字段生成映射
+            new_mappings = []
+            for field in missing_fields:
+                source_table = source_columns_map.get(field, '')
+                new_mappings.append({
+                    'targetField': field,
+                    'sourceTable': source_table,
+                    'sourceExpr': field,
+                    'transform': '直接映射',
+                })
+            if new_mappings:
+                pt['fieldMappings'] = existing_fm + new_mappings
+                logger.info("[MetricLineage]补全 %s.%s fieldMappings: +%d fields",
+                            pt_db, pt_tbl, len(new_mappings))
 
     # 收集所有相关的加工 SQL
     relevant_tables = metric_def.get('tables') or []

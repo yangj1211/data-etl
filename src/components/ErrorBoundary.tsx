@@ -27,9 +27,6 @@ export default class ErrorBoundary extends Component<Props, State> {
   };
 
   handleClearAndReset = () => {
-    // Clear potentially corrupted localStorage
-    const keys = Object.keys(localStorage).filter(k => k.startsWith('etl-'));
-    keys.forEach(k => localStorage.removeItem(k));
     window.location.reload();
   };
 

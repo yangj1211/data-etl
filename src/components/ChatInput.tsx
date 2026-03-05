@@ -22,7 +22,7 @@ export default function ChatInput() {
   const metricProcessing = useMetricChatStore(s => s.isProcessing);
   const metricSend = useMetricChatStore(s => s.sendMessage);
 
-  const savedConnections = useConnectionStore(s => s.connections);
+  const savedConnections = useConnectionStore(s => s.history);
   const removeConnection = useConnectionStore(s => s.remove);
 
   const allProcessedTables = useProcessedTableStore(s => s.tables);
@@ -184,19 +184,19 @@ export default function ChatInput() {
             </span>
             {savedConnections.map(c => (
               <span
-                key={c.connectionString}
+                key={c}
                 className="inline-flex items-center gap-1 max-w-[280px] group"
               >
                 <button
-                  onClick={() => handleSelectConnection(c.connectionString)}
+                  onClick={() => handleSelectConnection(c)}
                   disabled={isProcessing}
                   className="px-2 py-0.5 text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md hover:bg-emerald-100 hover:border-emerald-300 transition-colors cursor-pointer truncate disabled:opacity-50"
-                  title={c.connectionString}
+                  title={c}
                 >
-                  {c.label}
+                  {c.length > 40 ? c.slice(0, 40) + '…' : c}
                 </button>
                 <button
-                  onClick={() => removeConnection(c.connectionString)}
+                  onClick={() => removeConnection(c)}
                   className="p-0.5 text-slate-300 hover:text-red-400 transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
                   title="删除"
                 >

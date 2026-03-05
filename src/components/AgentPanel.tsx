@@ -5,6 +5,9 @@ import { useMetricChatStore } from '../metricChatStore';
 import { useDashboardStore } from '../dashboardStore';
 import { useChatModeStore } from '../chatModeStore';
 import { useSchemaStore } from '../schemaStore';
+import { useProcessedTableStore } from '../processedTableStore';
+import { useMetricDefStore } from '../metricDefStore';
+import { useMetricStore } from '../metricStore';
 import ChatMessage from './ChatMessage';
 import ChatInput from './ChatInput';
 import SchemaTree from './SchemaTree';
@@ -61,6 +64,9 @@ export default function AgentPanel({ onCollapse }: { onCollapse: () => void }) {
       loadForDashboard(activeDashboardId);
       loadMetricForDashboard(activeDashboardId);
       loadSchemaForDashboard(activeDashboardId);
+      useProcessedTableStore.getState().loadForDashboard(activeDashboardId);
+      useMetricDefStore.getState().loadForDashboard(activeDashboardId);
+      useMetricStore.getState().loadForDashboard(activeDashboardId);
     }
   }, [activeDashboardId, loadForDashboard, loadMetricForDashboard, loadSchemaForDashboard]);
 

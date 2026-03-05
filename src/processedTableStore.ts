@@ -1,57 +1,47 @@
 import { create } from 'zustand';
 import type { ProcessedTable } from './types';
-
-const STORAGE_KEY = 'etl-processed-tables';
-
-function loadAll(): ProcessedTable[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
-}
-
-function saveAll(tables: ProcessedTable[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(tables));
-}
+import { processedTableApi } from './storeApi';
 
 interface ProcessedTableState {
   tables: ProcessedTable[];
   getByDashboard: (dashboardId: string) => ProcessedTable[];
-  addOrUpdate: (entry: Omit<ProcessedTable, 'id'>) => void;
-  remove: (id: string) => void;
-  clearByDashboard: (dashboardId: string) => void;
+  loadForDashboard: (dashboardId: string) => Promise<void>;
+  addOrUpdate: (entry: Omit<ProcessedTable, 'id'>) => Promise<void>;
+  remove: (id: string, dashboardId: string) => Promise<void>;
+  clearByDashboard: (dashboardId: string) => Promise<void>;
 }
 
 export const useProcessedTableStore = create<ProcessedTableState>((set, get) => ({
-  tables: loadAll(),
+  tables: [],
 
   getByDashboard: (dashboardId) =>
     get().tables.filter(t => t.dashboardId === dashboardId),
 
-  addOrUpdate: (entry) => {
-    const id = `${entry.database}.${entry.table}`;
-    const existing = get().tables;
-    const idx = existing.findIndex(t => t.id === id && t.dashboardId === entry.dashboardId);
-    let updated: ProcessedTable[];
-    if (idx >= 0) {
-      updated = [...existing];
-      updated[idx] = { ...updated[idx], ...entry, id, processedAt: Date.now() };
-    } else {
-      updated = [{ ...entry, id, processedAt: Date.now() }, ...existing];
-    }
-    saveAll(updated);
-    set({ tables: updated });
+  loadForDashboard: async (dashboardId) => {
+    try {
+      const list = await processedTableApi.get(dashboardId);
+      // Replace entries for this dashboard, keep others
+      const others = get().tables.filter(t => t.dashboardId !== dashboardId);
+      set({ tables: [...list, ...others] });
+    } catch { /* ignore */ }
   },
 
-  remove: (id) => {
-    const updated = get().tables.filter(t => t.id !== id);
-    saveAll(updated);
-    set({ tables: updated });
+  addOrUpdate: async (entry) => {
+    const did = entry.dashboardId;
+    await processedTableApi.addOrUpdate(did, entry);
+    // Reload from backend to get merged result
+    const list = await processedTableApi.get(did);
+    const others = get().tables.filter(t => t.dashboardId !== did);
+    set({ tables: [...list, ...others] });
   },
 
-  clearByDashboard: (dashboardId) => {
-    const updated = get().tables.filter(t => t.dashboardId !== dashboardId);
-    saveAll(updated);
-    set({ tables: updated });
+  remove: async (id, dashboardId) => {
+    await processedTableApi.remove(dashboardId, id);
+    set({ tables: get().tables.filter(t => !(t.id === id && t.dashboardId === dashboardId)) });
+  },
+
+  clearByDashboard: async (dashboardId) => {
+    await processedTableApi.clear(dashboardId);
+    set({ tables: get().tables.filter(t => t.dashboardId !== dashboardId) });
   },
 }));

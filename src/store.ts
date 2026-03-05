@@ -5,6 +5,7 @@ import { fetchChatWithModel } from './api';
 import { useProcessedTableStore } from './processedTableStore';
 import { useSchemaStore } from './schemaStore';
 import { useConnectionStore } from './connectionStore';
+import { chatApi, etlStateApi } from './storeApi';
 
 export interface ReuseContext {
   database: string;
@@ -61,14 +62,11 @@ function getIntroMessage(): ChatMessage {
   };
 }
 
-/** 操作指南：自我对答演示的每条消息（用于流式追加） */
+/** 操作指南演示消息 */
 function getDemoConversationMessages(): ChatMessage[] {
   const t = Date.now();
   const msg = (id: string, role: 'system' | 'user', text: string): ChatMessage => ({
-    id,
-    role,
-    contents: [{ type: 'text' as const, text }],
-    timestamp: t,
+    id, role, contents: [{ type: 'text' as const, text }], timestamp: t,
   });
   return [
     msg('demo-0', 'system', '下面是一段**自问自答演示**（编造库表），带您走完从连接、选表、建表、映射到验证的全流程。\n\n请先在下方输入您的 **MySQL 连接串**；演示中将使用示例连接串继续。'),
@@ -114,30 +112,15 @@ function getDemoMessageDelay(msg: ChatMessage): number {
   const base = 1200;
   if (msg.role === 'user') return base;
   const text = msg.contents[0]?.type === 'text' ? msg.contents[0].text : '';
-  const len = text.length;
-  const extra = Math.min(3500, Math.floor(len / 50) * 250);
-  return base + extra;
+  return base + Math.min(3500, Math.floor(text.length / 50) * 250);
 }
 
-/** 持久化当前 dashboard 的聊天状态 */
+/** Persist to backend (fire-and-forget) */
 function persistState(state: { dashboardId: string | null; step: EtlStep; connectionString: string | null; messages: ChatMessage[] }) {
   if (!state.dashboardId) return;
-  const key = `etl-chat-${state.dashboardId}`;
-  localStorage.setItem(key, JSON.stringify({
-    step: state.step,
-    connectionString: state.connectionString,
-    messages: state.messages,
-  }));
-}
-
-function loadState(dashboardId: string): { step: EtlStep; connectionString: string | null; messages: ChatMessage[] } | null {
-  try {
-    const raw = localStorage.getItem(`etl-chat-${dashboardId}`);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  const did = state.dashboardId;
+  chatApi.save(did, state.messages).catch(() => {});
+  etlStateApi.set(did, { step: state.step, connectionString: state.connectionString || undefined }).catch(() => {});
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -145,32 +128,33 @@ export const useStore = create<AppState>((set, get) => ({
 
   loadForDashboard: (dashboardId: string) => {
     msgId = 0;
-    const saved = loadState(dashboardId);
-    if (saved) {
-      // 恢复 msgId
-      const maxId = saved.messages.reduce((max, m) => {
-        const match = m.id.match(/^msg-(\d+)$/);
-        return match ? Math.max(max, parseInt(match[1])) : max;
-      }, 0);
-      msgId = maxId;
-      set({
-        dashboardId,
-        step: saved.step,
-        connectionString: saved.connectionString,
-        messages: saved.messages,
-        isProcessing: false,
-      });
-      // 恢复连接后自动加载库表树，并保存到历史连接
-      if (saved.connectionString) {
-        useSchemaStore.getState().fetchTree(saved.connectionString);
-        useConnectionStore.getState().save(saved.connectionString);
-      }
-    } else {
-      set({
-        ...getDefaultState(),
-        dashboardId,
-      });
-    }
+    // Set default state immediately, then load from backend
+    set({ ...getDefaultState(), dashboardId });
+
+    (async () => {
+      try {
+        const [savedMessages, savedState] = await Promise.all([
+          chatApi.get(dashboardId),
+          etlStateApi.get(dashboardId),
+        ]);
+        if (savedMessages && savedMessages.length > 0) {
+          const maxId = savedMessages.reduce((max, m) => {
+            const match = m.id.match(/^msg-(\d+)$/);
+            return match ? Math.max(max, parseInt(match[1])) : max;
+          }, 0);
+          msgId = maxId;
+          set({
+            messages: savedMessages,
+            step: (savedState.step || 1) as EtlStep,
+            connectionString: savedState.connectionString || null,
+          });
+          if (savedState.connectionString) {
+            useSchemaStore.getState().fetchTree(savedState.connectionString);
+            useConnectionStore.getState().save(savedState.connectionString);
+          }
+        }
+      } catch { /* first load, no data yet */ }
+    })();
   },
 
   sendMessage: (text: string, reuseContext?: ReuseContext) => {
@@ -179,7 +163,6 @@ export const useStore = create<AppState>((set, get) => ({
 
     const { messages, step, dashboardId } = get();
 
-    // Build user message with optional reuse card
     let userText = trimmed;
     const extraBlocks: ContentBlock[] = [];
     if (reuseContext) {
@@ -192,7 +175,6 @@ export const useStore = create<AppState>((set, get) => ({
       if (!userText) {
         userText = `一键复用 ${reuseContext.database}.${reuseContext.table} 的加工逻辑，请直接生成加工方案`;
       }
-      // 复用模式直接跳到字段映射步骤
       set({ step: 4 as EtlStep });
     }
 
@@ -251,9 +233,7 @@ export const useStore = create<AppState>((set, get) => ({
 
         if (res.connectionReceived && looksLikeConnectionString(userText)) {
           updates.connectionString = userText;
-          // 自动保存连接串
           useConnectionStore.getState().save(userText);
-          // 自动加载库表树
           useSchemaStore.getState().fetchTree(trimmed);
         }
         if (res.currentStep && res.currentStep >= 1 && res.currentStep <= 6) {
@@ -263,11 +243,10 @@ export const useStore = create<AppState>((set, get) => ({
         set(updates);
         persistState({ ...get(), ...updates } as any);
 
-        // 检测是否有新的已加工表（由后端结构化返回）
+        // 检测是否有新的已加工表
         const dashId = get().dashboardId;
         if (dashId && res.processedTable) {
           const pt = res.processedTable;
-          // 提取对话历史用于加工逻辑摘要
           const chatHistory = get().messages
             .filter(m => !m.id.startsWith('demo-') && m.id !== 'intro')
             .map(m => ({
@@ -289,18 +268,15 @@ export const useStore = create<AppState>((set, get) => ({
             processedAt: Date.now(),
           });
 
-          // 刷新库表树并自动勾选新加工的表 + 基表
           const connStr = get().connectionString;
           if (connStr) {
             const schema = useSchemaStore.getState();
             await schema.fetchTree(connStr);
-            // 勾选新加工的目标表
             const tableKey = `${pt.database}.${pt.table}`;
             if (!schema.selectedTables.has(tableKey)) {
               schema.toggleTable(pt.database, pt.table);
             }
             schema.expandDb(pt.database);
-            // 自动勾选所有基表
             if (pt.sourceTables && Array.isArray(pt.sourceTables)) {
               for (const src of pt.sourceTables) {
                 const parts = src.split('.');
@@ -332,6 +308,9 @@ export const useStore = create<AppState>((set, get) => ({
     msgId = 0;
     const fresh = { ...getDefaultState(), dashboardId };
     set(fresh);
-    persistState(fresh);
+    if (dashboardId) {
+      chatApi.clear(dashboardId).catch(() => {});
+      etlStateApi.set(dashboardId, { step: 1 }).catch(() => {});
+    }
   },
 }));

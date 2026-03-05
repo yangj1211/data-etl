@@ -1,17 +1,26 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
 import DashboardContent from './components/DashboardContent';
 import AgentPanel from './components/AgentPanel';
 import MetricDefDetailModal from './components/MetricDefDetailModal';
 import ErrorBoundary from './components/ErrorBoundary';
 import { useDashboardStore } from './dashboardStore';
+import { useConnectionStore } from './connectionStore';
 import { PanelRightOpen } from 'lucide-react';
 import type { MetricDef } from './types';
 
 export default function App() {
   const activeDashboardId = useDashboardStore(s => s.activeDashboardId);
+  const loaded = useDashboardStore(s => s.loaded);
+  const loadDashboards = useDashboardStore(s => s.loadDashboards);
+  const loadConnections = useConnectionStore(s => s.load);
   const [agentOpen, setAgentOpen] = useState(true);
   const [viewingMetric, setViewingMetric] = useState<MetricDef | null>(null);
+
+  useEffect(() => {
+    loadDashboards();
+    loadConnections();
+  }, []);
 
   return (
     <div className="h-screen flex bg-slate-50 overflow-hidden">

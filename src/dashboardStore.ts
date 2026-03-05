@@ -1,70 +1,55 @@
 import { create } from 'zustand';
 import type { Dashboard } from './types';
-import { useProcessedTableStore } from './processedTableStore';
-
-const STORAGE_KEY = 'etl-dashboards';
-
-function loadDashboards(): Dashboard[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveDashboards(dashboards: Dashboard[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(dashboards));
-}
+import { dashboardApi } from './storeApi';
 
 interface DashboardState {
   dashboards: Dashboard[];
   activeDashboardId: string | null;
+  loaded: boolean;
 
-  createDashboard: (name: string, description: string) => string;
-  deleteDashboard: (id: string) => void;
-  renameDashboard: (id: string, name: string) => void;
+  loadDashboards: () => Promise<void>;
+  createDashboard: (name: string, description: string) => Promise<string>;
+  deleteDashboard: (id: string) => Promise<void>;
+  renameDashboard: (id: string, name: string) => Promise<void>;
   openDashboard: (id: string) => void;
   goHome: () => void;
 }
 
 export const useDashboardStore = create<DashboardState>((set, get) => ({
-  dashboards: loadDashboards(),
+  dashboards: [],
   activeDashboardId: null,
+  loaded: false,
 
-  createDashboard: (name, description) => {
+  loadDashboards: async () => {
+    try {
+      const list = await dashboardApi.list();
+      set({ dashboards: list, loaded: true });
+    } catch {
+      set({ loaded: true });
+    }
+  },
+
+  createDashboard: async (name, description) => {
     const id = `db-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const now = Date.now();
-    const dashboard: Dashboard = { id, name, description, createdAt: now, updatedAt: now };
-    const updated = [dashboard, ...get().dashboards];
-    saveDashboards(updated);
-    set({ dashboards: updated, activeDashboardId: id });
-    return id;
+    const d = await dashboardApi.create(id, name, description);
+    set({ dashboards: [d, ...get().dashboards], activeDashboardId: d.id });
+    return d.id;
   },
 
-  deleteDashboard: (id) => {
-    const updated = get().dashboards.filter(d => d.id !== id);
-    saveDashboards(updated);
-    // 清理该 dashboard 的聊天记录
-    localStorage.removeItem(`etl-chat-${id}`);
-    // 清理该 dashboard 的已加工表记录
-    useProcessedTableStore.getState().clearByDashboard(id);
-    set({ dashboards: updated });
+  deleteDashboard: async (id) => {
+    await dashboardApi.remove(id);
+    set({ dashboards: get().dashboards.filter(d => d.id !== id) });
   },
 
-  renameDashboard: (id, name) => {
-    const updated = get().dashboards.map(d =>
-      d.id === id ? { ...d, name, updatedAt: Date.now() } : d
-    );
-    saveDashboards(updated);
-    set({ dashboards: updated });
+  renameDashboard: async (id, name) => {
+    await dashboardApi.rename(id, name);
+    set({
+      dashboards: get().dashboards.map(d =>
+        d.id === id ? { ...d, name, updatedAt: Date.now() } : d
+      ),
+    });
   },
 
-  openDashboard: (id) => {
-    set({ activeDashboardId: id });
-  },
-
-  goHome: () => {
-    set({ activeDashboardId: null });
-  },
+  openDashboard: (id) => set({ activeDashboardId: id }),
+  goHome: () => set({ activeDashboardId: null }),
 }));
