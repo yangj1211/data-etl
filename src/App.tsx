@@ -17,12 +17,16 @@ export default function App() {
   const [agentOpen, setAgentOpen] = useState(true);
   const [viewingMetric, setViewingMetric] = useState<MetricDef | null>(null);
 
+  const loadMetrics = useMetricStore(s => s.loadFromServer);
+  const loadMetricDefs = useMetricDefStore(s => s.loadFromServer);
+  const loadProcessedTables = useProcessedTableStore(s => s.loadFromServer);
+
   useEffect(() => {
     useDashboardStore.getState().loadFromServer();
-    useMetricStore.getState().loadFromServer();
-    useMetricDefStore.getState().loadFromServer();
-    useProcessedTableStore.getState().loadFromServer();
-  }, []);
+    loadMetrics();
+    loadMetricDefs();
+    loadProcessedTables();
+  }, [loadMetrics, loadMetricDefs, loadProcessedTables]);
 
   // 加载中
   if (!loaded) {
@@ -53,9 +57,9 @@ export default function App() {
             onClick={() => {
               useDashboardStore.setState({ loaded: false, error: null });
               useDashboardStore.getState().loadFromServer();
-              useMetricStore.getState().loadFromServer();
-              useMetricDefStore.getState().loadFromServer();
-              useProcessedTableStore.getState().loadFromServer();
+              loadMetrics();
+              loadMetricDefs();
+              loadProcessedTables();
             }}
             className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 transition-colors cursor-pointer"
           >
