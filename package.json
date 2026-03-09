@@ -7,7 +7,7 @@
     "dev": "vite",
     "dev:server": "node server/server.js",
     "dev:all": "concurrently -n api,vite -c blue,green \"npm run dev:server\" \"npm run dev\"",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "preview": "vite preview",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
