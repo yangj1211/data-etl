@@ -2,7 +2,7 @@ const path = require('path');
 const express = require('express');
 const cors = require('cors');
 
-require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env'), override: false });
 
 let mysql2;
 try {
@@ -1730,9 +1730,23 @@ ${dbOperationNote}
 // ────────── 应用数据持久化 API ──────────
 const appDb = require('./appDb');
 
+// 在 Serverless 环境中，启动时立即初始化数据库（返回 Promise 供中间件 await）
+let _appDbInitPromise = null;
+if (appDb.isEnabled()) {
+  _appDbInitPromise = appDb.initTables().then(ok => {
+    if (ok) console.log('[AppDB] 数据库就绪');
+    else console.log('[AppDB] 数据库初始化失败');
+    return ok;
+  });
+}
+
 // 中间件：/api/app/* 请求需要数据库就绪（status 端点除外）
-app.use('/api/app', (req, res, next) => {
+app.use('/api/app', async (req, res, next) => {
   if (req.path === '/status') return next();
+  // 在 serverless 冷启动时等待数据库初始化完成
+  if (_appDbInitPromise && !appDb.isReady()) {
+    await _appDbInitPromise;
+  }
   if (!appDb.isReady()) {
     return res.status(503).json({ error: '应用数据库未就绪，请检查数据库连接配置' });
   }
@@ -1816,16 +1830,14 @@ app.get('/api/app/status', (req, res) => {
   res.json({ enabled: appDb.isReady() });
 });
 
-// 启动服务器，数据库初始化不阻塞启动
-app.listen(PORT, () => {
-  console.log(`ETL API server http://localhost:${PORT}`);
-  console.log(`  LLM_API_KEY: ${LLM_API_KEY ? '已设置' : '未设置'}`);
-  console.log(`  APP_DB: ${appDb.isEnabled() ? '已配置，正在初始化...' : '未配置（使用 localStorage）'}`);
-});
-// 后台初始化数据库（不阻塞服务启动）
-if (appDb.isEnabled()) {
-  appDb.initTables().then(ok => {
-    if (ok) console.log('[AppDB] 数据库就绪');
-    else console.log('[AppDB] 数据库初始化失败，降级为 localStorage');
+// 导出 Express app 供 Vercel Serverless 使用
+module.exports = app;
+
+// 仅在非 Vercel 环境下启动本地服务器
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`ETL API server http://localhost:${PORT}`);
+    console.log(`  LLM_API_KEY: ${LLM_API_KEY ? '已设置' : '未设置'}`);
+    console.log(`  APP_DB: ${appDb.isEnabled() ? '已配置，正在初始化...' : '未配置（使用 localStorage）'}`);
   });
 }

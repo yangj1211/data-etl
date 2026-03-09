@@ -26,7 +26,17 @@ function withTimeout(promise, ms, msg) {
 }
 
 async function getPool() {
-  if (pool) return pool;
+  if (pool) {
+    // 在 serverless 环境中验证连接是否仍然有效
+    try {
+      await pool.query('SELECT 1');
+      return pool;
+    } catch (_) {
+      // 连接已断开，重新创建
+      try { pool.end(); } catch (_) {}
+      pool = null;
+    }
+  }
   const cfg = getAppDbConfig();
   if (!cfg) throw new Error('APP_DB 未配置');
   // 先确保数据库存在
@@ -39,7 +49,7 @@ async function getPool() {
   );
   await tmpConn.query(`CREATE DATABASE IF NOT EXISTS \`${cfg.database}\``);
   tmpConn.destroy();
-  pool = mysql2.createPool({ ...cfg, waitForConnections: true, connectionLimit: 5, connectTimeout: 8000 });
+  pool = mysql2.createPool({ ...cfg, waitForConnections: true, connectionLimit: 3, connectTimeout: 8000 });
   return pool;
 }
 
