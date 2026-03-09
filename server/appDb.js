@@ -5,7 +5,7 @@
 const mysql2 = require('mysql2/promise');
 
 let pool = null;
-let _ready = false; // 数据库是否就绪
+let _ready = false; // 数据库是否就绪.
 
 function getAppDbConfig() {
   const host = process.env.APP_DB_HOST;
